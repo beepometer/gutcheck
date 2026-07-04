@@ -1,0 +1,19 @@
+# Gutcheck's own CI — dogfood. The suite includes the probe/CLI/lint/hook tests, the checker
+# self-test meta-guard, and the dist no-drift + no-orphan gates. The live-harness-dependent tests
+# (fidelity + the live reconciliation oracles) skip-on-absent, so this stays green standalone.
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['20', '22']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '${{ matrix.node }}'
+      - run: npm ci
+      - run: npm test

@@ -1,0 +1,66 @@
+# gutcheck — prove your AI-written tests actually test your code, as a PR gate.
+# Copy to .github/workflows/gutcheck.yml in your repo. Two modes are shown; keep one.
+#
+# Requires the `gutcheck` CLI on PATH (e.g. published to npm, or `npx -p <pkg> gutcheck`).
+# `--since` scopes the probe to the tests your PR touched, so it runs in seconds.
+name: gutcheck
+on: pull_request
+
+jobs:
+  gutcheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required only for Mode A (SARIF upload)
+      # permissions: add pull-requests: write for Mode C (posting/updating the sticky PR comment below) —
+      # uncomment the line below (and see the note beside the Mode C block) before enabling Mode C, or its
+      # `gh api` calls will 403.
+      # pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # gutcheck --since needs the PR's base commit in history
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci             # install YOUR project's test runner (vitest / jest / pytest / node)
+
+      # All three modes below invoke the published-package form (`npx gutcheck`) and scope `--since` to
+      # the same base-ref expression (`origin/${{ github.base_ref }}`) — a pinned base SHA (e.g.
+      # `${{ github.event.pull_request.base.sha }}`) also works if you'd rather pin to the exact merge base.
+
+      # ── Mode A: code-scanning annotations (SARIF) ──────────────────────────────────────────────
+      # Findings appear inline on the PR and in the Security tab; the `|| true` keeps the build green
+      # (drop it to fail the build on any hollow test).
+      - name: gutcheck (SARIF)
+        run: npx gutcheck --since "origin/${{ github.base_ref }}" --format sarif > gutcheck.sarif || true
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gutcheck.sarif
+
+      # ── Mode B: inline ::error annotations that FAIL the build (use instead of Mode A) ─────────
+      # - name: gutcheck (gate)
+      #   run: npx gutcheck --since "origin/${{ github.base_ref }}" --format github
+
+      # Mode C (optional): post the diff verification report as a sticky PR comment.
+      # Needs one more top-level permission — add this to the `permissions:` block above:
+      #   permissions:
+      #     contents: read
+      #     pull-requests: write
+      # (uncomment the `# pull-requests: write` line already sitting there instead of retyping it).
+      # Without it, the `gh api` POST/PATCH calls below 403.
+      # - run: |
+      #     npx gutcheck --since "origin/${{ github.base_ref }}" --format=markdown --no-fallback > report.md || true
+      #     BODY="$(cat report.md)"
+      #     MARKER='<!-- gutcheck-report -->'
+      #     EXISTING=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+      #       --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -1)
+      #     if [ -n "$EXISTING" ]; then
+      #       gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$EXISTING" -f body="$MARKER
+      #     $BODY"
+      #     else
+      #       gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" -f body="$MARKER
+      #     $BODY"
+      #     fi
+      #   env:
+      #     GH_TOKEN: ${{ github.token }}

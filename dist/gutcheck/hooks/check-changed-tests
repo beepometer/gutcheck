@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Stop hook (claude-code profile): when the agent finishes, run the mutation PROBE on the test files it
+# changed and, if any test passes even when the function it covers is gutted (proven HOLLOW), ask the
+# agent to fix it before finishing — the verify-as-you-write loop. Execution-proven only: it never blocks
+# on a static advisory or an inconclusive result, so a correction is always backed by "I broke the
+# function and this test still passed."
+#
+# Opt-in by design: it acts ONLY when a `.gutcheck` (or legacy `.skeptic-baseline`) marker exists, so
+# merely installing the plugin never surprises anyone. Fail-open: any error → exit 0, never blocks work.
+set -uo pipefail
+INPUT="$(cat)"                                   # Stop-hook stdin JSON (carries stop_hook_active)
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+GUTCHECK="${PLUGIN_ROOT}/mutation/gutcheck.mjs"
+DIR="$(pwd -P)"   # physical path: match git's canonical repo root so --since scope doesn't drop tests
+
+[ -f "$GUTCHECK" ] || exit 0
+{ [ -f "$DIR/.gutcheck" ] || [ -f "$DIR/.skeptic-baseline" ]; } || exit 0   # opt-in
+git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || exit 0
+command -v node >/dev/null 2>&1 || exit 0
+
+# LOOP GUARD: if we're already continuing from a previous Stop block, the agent got its one forced
+# attempt — allow the stop. node (guaranteed above) parses stop_hook_active; exit 0 = active.
+if printf '%s' "$INPUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let a=false;try{a=JSON.parse(s).stop_hook_active===true}catch{}process.exit(a?0:1)})'; then
+  exit 0
+fi
+
+# Probe everything touched since the SESSION baseline (recorded by session-start) — so work the agent
+# already committed is still probed. Falls back to HEAD when no valid baseline is recorded.
+BASELINE="HEAD"
+GITDIR="$(git -C "$DIR" rev-parse --git-dir 2>/dev/null || true)"
+if [ -n "$GITDIR" ]; then
+  case "$GITDIR" in /*) ;; *) GITDIR="$DIR/$GITDIR" ;; esac
+  if [ -f "$GITDIR/gutcheck-baseline" ]; then
+    CAND="$(tr -d '[:space:]' < "$GITDIR/gutcheck-baseline")"
+    if [ -n "$CAND" ] && git -C "$DIR" cat-file -e "${CAND}^{commit}" 2>/dev/null; then BASELINE="$CAND"; fi
+  fi
+fi
+# Single front door: self-check included (a broken probe exits 2 with empty stdout → fail-open below),
+# no full-suite fallback (a Stop must stay fast), probe cap bounds worst-case latency under the 120s timeout.
+JSON="$(node "$GUTCHECK" "$DIR" --json --no-fallback "--since=$BASELINE" --max-probes=20 2>/dev/null)" || true
+[ -n "$JSON" ] || exit 0
+
+# Parse the prove JSON and, if there are proven-hollow tests, emit a Stop-hook block. node is guaranteed
+# present (guarded above); it does the JSON parsing and escaping so bash never has to.
+printf '%s' "$JSON" | node -e '
+  let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+    let r; try { r = JSON.parse(s); } catch { process.exit(0); }
+    const h = (r && r.hollow) || [];
+    if (!h.length) process.exit(0);
+    const lines = h.map((x) => `  - ${x.file}:${x.line} "${x.name}" — stays green even when ${(x.survivors || []).join(", ")}() returns a wrong value, so it does not test that function.`);
+    const reason =
+      `gutcheck: ${h.length} test(s) you just changed are HOLLOW (proven by execution). ` +
+      `Fix before finishing — assert the real expected value (not one re-derived from the function under test), ` +
+      `so the test catches the break:\n${lines.join("\n")}`;
+    process.stdout.write(JSON.stringify({ decision: "block", reason, hookSpecificOutput: { hookEventName: "Stop", additionalContext: reason } }) + "\n");
+  });
+'
+exit 0

@@ -1,0 +1,11 @@
+ok 1 s one
+ok 2 s two
+not ok 3 s three
+  1 == 2
+  AssertionError [ERR_ASSERTION]: 1 == 2
+      at Context.<anonymous> (t.test.js:5:36)
+      at process.processImmediate (node:internal/timers:484:21)
+# tests 3
+# pass 2
+# fail 1
+1..3

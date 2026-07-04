@@ -1,0 +1,9 @@
+[
+  { "name": "ms",         "url": "https://github.com/vercel/ms",          "ref": "HEAD", "lang": "js",     "install": "npm i --silent --no-audit --no-fund" },
+  { "name": "slugify",    "url": "https://github.com/simov/slugify",      "ref": "HEAD", "lang": "js",     "install": "npm i --silent --no-audit --no-fund" },
+  { "name": "classnames", "url": "https://github.com/JedWatson/classnames","ref": "HEAD", "lang": "js",     "install": "npm i --silent --no-audit --no-fund" },
+  { "name": "mitt",       "url": "https://github.com/developit/mitt",     "ref": "HEAD", "lang": "ts",     "install": "npm i --silent --no-audit --no-fund" },
+  { "name": "yargs-parser","url": "https://github.com/yargs/yargs-parser","ref": "HEAD", "lang": "js",     "install": "npm i --silent --no-audit --no-fund" },
+  { "name": "python-slugify","url":"https://github.com/un33k/python-slugify","ref":"HEAD","lang":"py",     "install": "pip install -q -e . || true" },
+  { "name": "humanize",   "url": "https://github.com/python-humanize/humanize","ref":"HEAD","lang":"py",   "install": "pip install -q -e . || true" }
+]

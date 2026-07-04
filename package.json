@@ -1,0 +1,50 @@
+{
+  "name": "gutcheck",
+  "version": "0.2.0",
+  "description": "Prove your AI-written tests actually test your code: a diff-scoped mutation probe that guts each tested function and reruns only its test — plus a sub-second lint and a Claude Code Stop hook that re-probes what an agent just changed.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "mutation-testing",
+    "test-quality",
+    "hollow-tests",
+    "ai-generated-code",
+    "pseudo-tested",
+    "testing",
+    "claude-code"
+  ],
+  "files": [
+    "checker",
+    "mutation",
+    "configure",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/beepometer/gutcheck.git"
+  },
+  "homepage": "https://github.com/beepometer/gutcheck",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "gutcheck": "mutation/gutcheck.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node checker/cli.mjs",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "gutcheck": "node mutation/gutcheck.mjs",
+    "probe": "node mutation/probe.mjs"
+  },
+  "devDependencies": {
+    "ava": "^6.4.1",
+    "jest": "^29.7.0",
+    "mocha": "^10.8.2",
+    "vitest": "^3.2.6"
+  }
+}

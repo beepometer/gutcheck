@@ -1,0 +1,72 @@
+{
+  "identity": {
+    "projectName": "Gutcheck",
+    "productName": "Gutcheck",
+    "slugPrefix": ""
+  },
+  "commands": {
+    "test": "npm test",
+    "testFast": "npm test",
+    "testFull": "npm test",
+    "check": "npm test"
+  },
+  "language": {
+    "fileExt": ".mjs",
+    "declKeywords": ["function", "class", "const"],
+    "visibilityKeyword": "export",
+    "nullSentinel": "null",
+    "placeholderStub": "throw new Error('TODO')",
+    "silentSkip": "test.skip",
+    "assertForm": "assert.equal(actual, expected)",
+    "failLoudForm": "if (!existsSync(file)) throw new Error(`missing ${file}`)",
+    "docCommentForm": "JSDoc",
+    "classDeclRegex": "\\b(?:class|function|const)\\s+([A-Za-z_][A-Za-z0-9_]*)"
+  },
+  "paths": {
+    "srcRoots": { "main": ["checker", "configure", "scripts"], "test": ["test"] },
+    "basePackage": null,
+    "valueUniverseDirs": [],
+    "specDir": "docs/specs",
+    "planDir": "docs/plans",
+    "findingsDir": "docs/findings",
+    "confabLedger": null,
+    "referenceKbRoot": "reference"
+  },
+  "docs": {
+    "projectRulesFile": "AGENTS.md",
+    "digestFiles": ["CLAUDE.md"],
+    "openCountHeading": "(N open)",
+    "defaultBranch": "main",
+    "branchNaming": null,
+    "commitTrailer": "Reference the finding id this commit closes."
+  },
+  "vocabularies": {
+    "optOutMarkers": ["// TIME-LEAK-OK:", "// SKIP-CONTRACT:", "// CLOSED-FORM-ORACLE:"],
+    "reviewVerdicts": {
+      "testReview": ["SOUND", "WEAK", "WRONG-ORACLE", "USELESS", "DISHONEST"],
+      "mergeDecision": ["MERGE", "MERGE_WITH_FIXES", "REWORK"],
+      "severity": ["MUST_FIX", "SHOULD_FIX", "OBSERVATION"]
+    }
+  },
+  "calibratedConstants": {
+    "confabPrior": {
+      "note": "Recalibrate from your own audits — agent-produced citations confabulate bimodally: concrete local sources verify clean, abstract sources (papers, standards sections, patent assignees) confabulate heavily.",
+      "bimodal": {
+        "concrete": "low (local file:line / extracted strings verify clean)",
+        "abstract": "high (journals, paid standards, patent assignees, textbook section numbers)"
+      },
+      "samplePolicy": { "initial": 3, "expandTo": 6, "ideaSeedsAt": 2 }
+    }
+  },
+  "checker": {
+    "harnessDirs": { "skills": "skills", "agents": "agents", "workflows": "workflows" },
+    "docPrefixes": ["docs", ".claude"],
+    "placeholderTokens": ["<", "...", "YYYY", "MM-DD"],
+    "historicalMarkers": ["removed", "deleted", "deprecated", "legacy", "[sic]", "corrected from"],
+    "externalMdAllowlist": ["AGENTS.md", "GEMINI.md", "CLAUDE.md"],
+    "checks": []
+  },
+  "platform": {
+    "runtime": "claude-code"
+  }
+}

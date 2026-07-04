@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+.idea/
+
+# local, never-shipped config + config drafts
+.claude/
+*.draft.json
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# benchmark — local research harness, not part of the shipped framework
+benchmark/*
+!benchmark/evidence/
+benchmark/evidence/results*/
+
+# dev-facing planning records — not part of the shipped framework
+docs/plans/
+docs/specs/
+docs/remediation-roadmap.md

@@ -1,0 +1,224 @@
+{
+  "identity": {
+    "projectName": "AcoustiQ",
+    "productName": "Skeptic",
+    "slugPrefix": "skeptic-",
+    "legacySlugs": [
+      "skeptical-",
+      "superpowers"
+    ],
+    "agentFamilyRule": "Never dispatch general-purpose for a Skeptic engagement; every phase stays inside the skeptic/audit family until close."
+  },
+  "commands": {
+    "test": "./gradlew --no-daemon testDebugUnitTest",
+    "testFast": "./gradlew --no-daemon testDebugUnitTest -PfastLane",
+    "testFull": "./gradlew --no-daemon testDebugUnitTest --rerun-tasks",
+    "testSingleSelector": "./gradlew --no-daemon testDebugUnitTest --tests \"*{name}*\"",
+    "buildPassLine": "BUILD (SUCCESSFUL|FAILED)",
+    "buildSuccessLine": "BUILD SUCCESSFUL",
+    "resultsDir": "app/build/test-results/testDebugUnitTest",
+    "longRunningCmd": "./gradlew",
+    "check": "./gradlew --no-daemon testDebugUnitTest --tests \"*SkepticConsistencyTest\" --tests \"*WorkflowDisciplineTest\" --tests \"com.roomacoustics.guard.*\""
+  },
+  "language": {
+    "fileExt": ".kt",
+    "declKeywords": [
+      "fun",
+      "class",
+      "object",
+      "data class",
+      "val"
+    ],
+    "visibilityKeyword": "internal",
+    "nullSentinel": "Float.NaN",
+    "placeholderStub": "TODO()",
+    "silentSkip": "Assume.assumeTrue",
+    "assertForm": "assertEquals(expected, actual, tolerance)",
+    "failLoudForm": "require(file.exists()) { \"actionable error\" }",
+    "docCommentForm": "KDoc",
+    "classDeclRegex": "\\b(?:class|object|interface)\\s+([A-Z][A-Za-z0-9_]*)"
+  },
+  "paths": {
+    "srcRoots": {
+      "main": [
+        "app/src/main/java/com/roomacoustics"
+      ],
+      "test": [
+        "app/src/test/java/com/roomacoustics"
+      ]
+    }
+  },
+  "docs": {
+    "projectRulesFile": "CLAUDE.md",
+    "digestFiles": [
+      "CLAUDE.md",
+      "docs/superpowers/specs/SPECS.md",
+      "docs/superpowers/plans/PLANS.md",
+      "docs/superpowers/audit-findings/FINDINGS.md",
+      "docs/RESIDUALS.md"
+    ],
+    "findingIdScheme": {
+      "behaviorChanging": "R-NN",
+      "behaviorPreserving": "S-NN"
+    },
+    "backlogFile": "docs/RESIDUALS.md",
+    "openCountHeading": "(N open)",
+    "defaultBranch": "main",
+    "branchNaming": "<topic>-<wave-or-phase>",
+    "commitTrailer": "Reference the finding ID (R-NN / S-NN) the commit closes; end the message with the Co-Authored-By trailer."
+  },
+  "checker": {
+    "harnessDirs": {
+      "skills": "skills",
+      "agents": "agents",
+      "workflows": "workflows"
+    },
+    "docPrefixes": [
+      "docs",
+      ".claude"
+    ],
+    "placeholderTokens": [
+      "<",
+      "...",
+      "YYYY",
+      "MM-DD",
+      "<next-index>"
+    ],
+    "historicalMarkers": [
+      "removed",
+      "deleted",
+      "deprecated",
+      "legacy",
+      "vendored",
+      "[sic]",
+      "corrected from",
+      "prior citation"
+    ],
+    "externalMdAllowlist": [
+      "MEMORY.md",
+      "GEMINI.md",
+      "AGENTS.md"
+    ],
+    "checks": [
+      {
+        "id": "no-masking-gradle-pipe",
+        "kind": "forbiddenPattern",
+        "description": "no harness shell example pipes the build command into an exit-swallowing command without capturing the real exit",
+        "params": {
+          "patternSrc": "gradlew\\b.*\\|\\s*(tee|tail|head|grep|cat|less|awk|sed|wc|sort|uniq)\\b",
+          "exemptSrc": "PIPESTATUS|EXIT=\\$",
+          "windowAhead": 2
+        },
+        "selfTest": {
+          "mustFlag": [
+            "gradlew test | tail -5"
+          ],
+          "mustNotFlag": [
+            "gradlew test | tail -5\necho EXIT=${PIPESTATUS[0]}",
+            "gradlew test ; grep -E BUILD"
+          ]
+        }
+      },
+      {
+        "id": "no-background-orphan",
+        "kind": "forbiddenPattern",
+        "description": "no harness shell example backgrounds the build command (trailing &, nohup, subshell &) faking exit 0",
+        "params": {
+          "patternSrc": "\\bnohup\\s+\\S*gradlew\\b|gradlew\\b.*[^&>0-9]&\\s*$|\\(\\s*[^)]*gradlew[^)]*\\)\\s*&\\s*$",
+          "exemptSrc": "BACKGROUND-OK:",
+          "windowAhead": 0
+        },
+        "selfTest": {
+          "mustFlag": [
+            "nohup gradlew test &",
+            "( gradlew test ) &",
+            "gradlew test &"
+          ],
+          "mustNotFlag": [
+            "gradlew test 2>&1 | grep FAIL",
+            "echo hi &",
+            "# BACKGROUND-OK: ( gradlew test ) &"
+          ]
+        }
+      },
+      {
+        "id": "test-shape-guards",
+        "kind": "testShapeGuard",
+        "description": "test source carries no wall-clock sleep, tautological assertion, silent skip, unseeded RNG, or under-justified @Ignore (comment-stripped, opt-out markers respected)",
+        "params": {
+          "lang": "kotlin",
+          "excludePathSubstrings": [
+            "com/roomacoustics/guard/",
+            "com/roomacoustics/harness/"
+          ],
+          "rules": [
+            {
+              "id": "time-leak",
+              "patternSrc": "\\b(Thread|SystemClock)\\.sleep\\s*\\(|\\bTimeUnit\\.\\w+\\.sleep\\s*\\(|runBlocking\\b[^{]*\\{[^}]*\\bdelay\\s*\\(",
+              "exemptSrc": "TIME-LEAK-OK:"
+            },
+            {
+              "id": "tautology-size-ge-0",
+              "patternSrc": "assertTrue\\([^)]*\\.size\\s*>=\\s*0\\s*\\)"
+            },
+            {
+              "id": "tautology-notnull-array",
+              "patternSrc": "assertNotNull\\(\\s*[^)]*(FloatArray|DoubleArray|IntArray|LongArray|ShortArray)[^)]*\\)"
+            },
+            {
+              "id": "tautology-true",
+              "patternSrc": "assertTrue\\(\\s*true\\s*\\)"
+            },
+            {
+              "id": "tautology-same-args",
+              "patternSrc": "assertEquals\\(\\s*([\\w.]+)\\s*,\\s*\\1\\s*\\)"
+            },
+            {
+              "id": "tautology-false",
+              "patternSrc": "assertFalse\\(\\s*false\\s*\\)"
+            },
+            {
+              "id": "silent-skip",
+              "patternSrc": "\\bAssume\\.assume(True|NoException|That)\\s*\\(",
+              "exemptSrc": "SKIP-CONTRACT:"
+            },
+            {
+              "id": "seed-discipline",
+              "patternSrc": "\\bRandom\\s*\\(\\s*\\)|\\bRandom\\s*\\(\\s*System\\.(nanoTime|currentTimeMillis)|\\bMath\\.random\\s*\\(|\\bRandom\\.Default\\b|\\bThreadLocalRandom\\b",
+              "exemptSrc": "SEED-OK:"
+            }
+          ],
+          "ignoreRule": {
+            "annotations": [
+              "@Ignore",
+              "@org.junit.Ignore"
+            ],
+            "annotationRegex": "@(?:org\\.junit\\.)?Ignore\\s*\\(\\s*\"(.*?)\"",
+            "minReasonLen": 12,
+            "windowLines": 5
+          }
+        },
+        "selfTest": {
+          "mustFlag": [
+            "fun t() { Thread.sleep(50) }",
+            "assertTrue(arr.size >= 0)",
+            "assertTrue(true)",
+            "Assume.assumeTrue(cond)",
+            "val r = Random()",
+            "@Ignore(\"wip\")\nfun t(){}"
+          ],
+          "mustNotFlag": [
+            "fun t() { Thread.sleep(50) // TIME-LEAK-OK: warmup }",
+            "assertEquals(expected, actual)",
+            "Assume.assumeTrue(cond) // SKIP-CONTRACT: device",
+            "val r = Random(42)",
+            "@Ignore(\"R-191 underrun smoke — device only path\")\nfun t(){}"
+          ]
+        }
+      }
+    ]
+  },
+  "platform": {
+    "runtime": "claude-code"
+  }
+}
