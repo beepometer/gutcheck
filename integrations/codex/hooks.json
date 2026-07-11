@@ -1,0 +1,8 @@
+{
+  "Stop": [
+    { "type": "command", "command": ["npx", "--yes", "gutcheck", "gate", "--harness=codex"] }
+  ],
+  "SessionStart": [
+    { "type": "command", "command": ["bash", "node_modules/gutcheck/hooks/session-start"] }
+  ]
+}

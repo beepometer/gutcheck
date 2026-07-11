@@ -1,0 +1,22 @@
+TAP version 13
+ok 1 - one
+ok 2 - two
+not ok 3 - three
+  ---
+    name: AssertionError
+    assertion: t.is()
+    details:
+      'Difference (- actual, + expected):': |-
+        - 1
+        + 2
+    message: ''
+    at: >-
+      ExecutionContext.is
+      (file:///private/var/folders/6y/4xc7w0m96bjgtq9g748t72rwvrlnhz/T/tmp.rdCXOZJVXM/node_modules/ava/lib/assert.js:310:16)
+  ...
+
+1..3
+# tests 3
+# pass 2
+# fail 1
+

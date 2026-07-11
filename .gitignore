@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+.idea/
+
+# local Claude Code settings
+.claude/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# benchmark: the studies' scripts, corpora, and result docs are tracked; regenerated outputs are not
+benchmark/*
+!benchmark/evidence/
+!benchmark/loop-pilot/
+!benchmark/kotlin-pilot/
+benchmark/evidence/results*
+benchmark/loop-pilot/mbpp*.json
+benchmark/kotlin-pilot/*.json
+
+# JVM probe fixture build output
+test/fixtures/jvm-project/.gradle/
+test/fixtures/jvm-project/build/
+test/fixtures/jvm-project/**/build/

@@ -1,0 +1,22 @@
+{
+  "name": "gutcheck",
+  "description": "Prove your AI-written tests actually test your code — a fast, diff-scoped mutation probe that guts each tested function and reports the tests that don't notice, plus a self-testing deterministic checker that fails closed unless it catches its own planted bugs.",
+  "version": "0.3.0",
+  "author": {
+    "name": "the Gutcheck authors"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/beepometer/gutcheck",
+  "homepage": "https://github.com/beepometer/gutcheck",
+  "keywords": [
+    "mutation-testing",
+    "test-quality",
+    "hollow-tests",
+    "ai-generated-code",
+    "static-analysis",
+    "code-review",
+    "testing",
+    "agents",
+    "claude-code"
+  ]
+}

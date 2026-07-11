@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# UserPromptSubmit hook for the Gutcheck plugin (claude-code profile). Injects the
+# foundation-verification cue on SUBSTANTIVE prompts only -- not short pleasantries or
+# one-word follow-ups -- so the no-trust discipline fires at decision time without
+# desensitizing the model by riding every single turn. Prompt-adjacent delivery is the
+# point: a neutral "add X" prompt does not, on its own, trigger re-verification of the
+# foundation; the same instruction carried with the prompt does.
+# Gated in-script (below). To disable entirely, remove the UserPromptSubmit block from
+# hooks.json. Fail-open: never blocks a prompt, and on any parse doubt it injects.
+set -euo pipefail
+
+payload="$(cat 2>/dev/null || true)"
+
+DIR="$(pwd -P)"
+[ "${GUTCHECK_HOOK:-}" = "off" ] && exit 0   # global opt-out
+# Opt-in: the cue rides prompts only when the repo's .gutcheck marker asks for it.
+grep -qs '^prompt-cue$' "$DIR/.gutcheck" || exit 0
+
+# Extract the user's prompt text (best-effort JSON parse via node, the plugin's existing
+# dependency). On any failure prompt stays empty and we fall through to injecting (safe).
+prompt=""
+if command -v node >/dev/null 2>&1; then
+  prompt="$(printf '%s' "$payload" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).prompt||""))}catch{process.stdout.write("")}})' 2>/dev/null || true)"
+fi
+
+# Gate: skip the cue on a trivial turn (short AND no build/verify-shaped intent). A
+# parsed prompt that is short and intent-free is a pleasantry/one-liner -> no injection.
+# Empty prompt (parse failed / no stdin) falls through and injects.
+if [ -n "$prompt" ]; then
+  lc="$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')"
+  intent='build|extend|add |fix|implement|refactor|debug|test|verif|review|migrat|port |integrat|optim|investigat|design|plan|spec|cite|citation|oracle|toleranc|threshold|constant|standard|patent|datasheet|change|update|create|write|audit|check'
+  if [ "${#prompt}" -lt 80 ] && ! printf '%s' "$lc" | grep -Eq "$intent"; then
+    exit 0
+  fi
+fi
+
+# Generic, calibration-free (no domain terms, no internal quotes/apostrophes so the
+# single-quoted literal needs no escaping). Keep it tight -- it rides substantive prompts.
+cue='Before you build on, extend, fix, or trust any existing code, data, fixture, or result, independently verify the foundation you will depend on. A docstring, comment, variable name, or an attestation that something was validated-against-X or verified-to-tolerance is a claim ABOUT a check, not the check itself; a provided or bundled test that passes can be a self-shadow that pins the output of the code under test, which may itself be wrong. Confirm every depended-on value, constant, and behaviour against an authority you establish independently, and report anything that does not reconcile. This holds even when the task only asks you to add something on top: building on top does not move the foundation out of scope.'
+
+# JSON-escape via bash parameter substitution; backslash first so later passes do
+# not double-escape it (same order the session-start hook uses).
+escape_for_json() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+ctx='<gutcheck-note>\nVerify the foundation before you build on it.\n\n'"$(escape_for_json "$cue")"'\n</gutcheck-note>'
+printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "UserPromptSubmit",\n    "additionalContext": "%s"\n  }\n}\n' "$ctx"
+exit 0

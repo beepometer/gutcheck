@@ -1,0 +1,3 @@
+# Byte-stable checkouts everywhere: the dist no-drift gate byte-compares generated vs committed
+# files, and the bash scripts must stay LF. Windows runners default to autocrlf without this.
+* text=auto eol=lf

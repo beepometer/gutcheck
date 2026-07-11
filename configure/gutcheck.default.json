@@ -1,0 +1,265 @@
+{
+  "identity": {
+    "projectName": "YourProject",
+    "productName": "Gutcheck",
+    "slugPrefix": ""
+  },
+  "commands": {
+    "test": "npm test",
+    "testFast": "npm run test:fast",
+    "testFull": "npm test",
+    "check": "npm run check"
+  },
+  "language": {
+    "fileExt": ".ts",
+    "declKeywords": [
+      "function",
+      "class",
+      "const"
+    ],
+    "visibilityKeyword": "private",
+    "nullSentinel": "null",
+    "placeholderStub": "throw new Error('TODO')",
+    "silentSkip": "test.skip",
+    "assertForm": "expect(actual).toBeCloseTo(expected, digits)",
+    "failLoudForm": "if (!existsSync(file)) throw new Error(`missing ${file}`)",
+    "docCommentForm": "JSDoc",
+    "classDeclRegex": "\\b(?:class|interface|type)\\s+([A-Z][A-Za-z0-9_]*)"
+  },
+  "paths": {
+    "srcRoots": {
+      "main": [
+        "src"
+      ],
+      "test": [
+        "test"
+      ]
+    }
+  },
+  "docs": {
+    "projectRulesFile": "AGENTS.md",
+    "digestFiles": [
+      "docs/DECISIONS.md"
+    ],
+    "openCountHeading": "(N open)",
+    "defaultBranch": "main",
+    "branchNaming": null,
+    "commitTrailer": "Reference the finding id this commit closes."
+  },
+  "checker": {
+    "harnessDirs": {
+      "skills": "skills",
+      "agents": "agents",
+      "workflows": "workflows"
+    },
+    "docPrefixes": [
+      "docs",
+      ".claude"
+    ],
+    "placeholderTokens": [
+      "<",
+      "...",
+      "YYYY",
+      "MM-DD"
+    ],
+    "historicalMarkers": [
+      "removed",
+      "deleted",
+      "deprecated",
+      "legacy",
+      "[sic]",
+      "corrected from"
+    ],
+    "externalMdAllowlist": [
+      "AGENTS.md",
+      "GEMINI.md",
+      "CLAUDE.md",
+      "README.md",
+      "INDEX.md"
+    ],
+    "checks": [
+      {
+        "id": "js-test-shape-guards",
+        "kind": "testShapeGuard",
+        "description": "JS/TS test source carries no type-tautology length assertion, substring-of-derivable numeric assertion, or time/random leak (Math.random/Date.now) — comment-stripped, opt-out markers respected",
+        "params": {
+          "lang": "typescript",
+          "rules": [
+            {
+              "id": "tautology-js-length-ge-0",
+              "patternSrc": "expect\\(\\s*[^)]*\\.(?:length|size)\\s*\\)\\s*\\.(?:toBeGreaterThanOrEqual\\(\\s*0\\s*\\)|toBeGreaterThan\\(\\s*-1\\s*\\))"
+            },
+            {
+              "id": "substring-of-derivable-numeric",
+              "patternSrc": "\\.toContain\\(\\s*['\"][\\d.,$%\\s-]+['\"]\\s*\\)",
+              "exemptSrc": "SUBSTRING-OK:"
+            },
+            {
+              "id": "time-random-leak",
+              "patternSrc": "^(?=.*\\.(?:toBe|toEqual|toStrictEqual|toBeCloseTo)\\()(?=.*(?:Math\\.random|Date\\.now)\\s*\\()",
+              "exemptSrc": "TIME-LEAK-OK:",
+              "fileExemptSrc": "MockDate|useFakeTimers|sinon\\.useFakeTimers|jest\\.useFakeTimers|vi\\.useFakeTimers"
+            }
+          ]
+        },
+        "selfTest": {
+          "mustFlag": [
+            "expect(rows.length).toBeGreaterThanOrEqual(0)",
+            "expect(label).toContain('142')",
+            "expect(label).toBe(`sess-${Date.now()}`)",
+            "expect(r).toBe(Math.random())"
+          ],
+          "mustNotFlag": [
+            "expect(rows.length).toBe(3)",
+            "expect(label).toContain('142') // SUBSTRING-OK: legacy",
+            "expect(msg).toContain('not found')",
+            "expect(x).toBe(Date.now()) // TIME-LEAK-OK: elapsed only",
+            "const start = Date.now();",
+            "const d = new Date(2020, 0, 1);",
+            "const r = seededRandom(42);",
+            "valid: ['2100-08-04', new Date(Date.now() + 86400000).toString()]",
+            "str += String.fromCharCode(Math.random() * 26 | 97);",
+            "expect(math.isPrime(new Date())).toThrow()"
+          ]
+        }
+      },
+      {
+        "id": "magic-literal-guard",
+        "kind": "magicLiteralGuard",
+        "description": "a numeric literal in an expected-value assertion (toBeCloseTo / decimal toBe) must carry an inline derivation, a URL, or a CLOSED-FORM-ORACLE marker",
+        "params": {
+          "lang": "typescript"
+        },
+        "selfTest": {
+          "mustFlag": [
+            "expect(x).toBeCloseTo(3.14159, 5)",
+            "expect(x).toBe(85.83333333333333)"
+          ],
+          "mustNotFlag": [
+            "expect(x).toBeCloseTo(3.14159, 5) // CLOSED-FORM-ORACLE: pi",
+            "expect(area).toBeCloseTo(78.54, 2) // pi * 5^2 = 78.54",
+            "expect(n).toBe(3)",
+            "expect(d.asSeconds()).toBe(0.5)"
+          ]
+        }
+      },
+      {
+        "id": "external-citation-needs-url",
+        "kind": "forbiddenPattern",
+        "description": "an external standard/spec citation that BACKS A TEST VALUE must carry a URL (or a CITATION-OK: opt-out) within its ±window; only fires when an assertion/value is adjacent — a bare standard-name mention in a docstring, comment, or test title is not a value citation and is not flagged",
+        "params": {
+          "scanRoots": [
+            "test"
+          ],
+          "blankStrings": true,
+          "lang": "javascript",
+          "windowBehind": 2,
+          "windowAhead": 2,
+          "patternSrc": "\\b(?:RFC|ISO|IEC|IEEE|ITU|ANSI|ASTM|NIST)\\b[\\s-]?\\d|\\bdoi\\.org/|\\bdoi:\\s*10\\.\\d|\\bet al\\.\\s*\\(?\\d{4}",
+          "nearTokens": [
+            "\\bassert(?:\\s|[A-Z])",
+            "expect\\s*\\(",
+            "\\.toBe",
+            "\\.toEqual",
+            "\\bexpected\\s*[:=]",
+            "==",
+            "approx\\("
+          ],
+          "exemptSrc": "https?://|CITATION-OK:|\\bISO[\\s-]?(?:8601|4217|3166|639|8859)\\b|\\bRFC[\\s-]?(?:3339|2822)\\b|\\bIEEE[\\s-]?754\\b",
+          "lineExemptSrc": "\\b(?:it|test|describe|context|specify)\\s*\\(|^\\s*\\*"
+        },
+        "selfTest": {
+          "mustFlag": [
+            "// Per RFC 7231 §6.1, 200 is cacheable.\nexpect(res.status).toBe(200)",
+            "// per ISO 9999 §2 the limit is 5\nassert limit == 5",
+            "expect(x).toBe(1)  // ref doi:10.1109/5.771073"
+          ],
+          "mustNotFlag": [
+            "// RFC 7231 §6.1 (https://www.rfc-editor.org/rfc/rfc7231: 'cacheable')\nexpect(x).toBe(200)",
+            "/** A parser for ISO-8601 strings. */",
+            "it('parses RFC 2822 dates', () => {",
+            "// ISO 4217 — CITATION-OK: paywalled\nexpect(code).toBe('USD')",
+            "expect(user.code).toBe('US0123456')",
+            "expect(d).toBe(x)  // parse an ISO 8601 timestamp",
+            "const status = 200;",
+            "test('returns an RFC 1123 date', () => { expect(d.toHTTP()).toBe('Tue, 25 May 1982 09:23:54 GMT'); });",
+            "assertEquals(\"per IEC 61672-1 §5.4.6 spec value\", 2.5, value)",
+            " * tolerance is the project's ISO 3382-2 §A.6 convention\n * and asserts within it\nassertEquals(5.0, x)"
+          ]
+        }
+      },
+      {
+        "id": "js-derivation-coherence",
+        "kind": "derivationCoherence",
+        "description": "an INLINE arithmetic derivation comment must actually compute the asserted value; a mismatch (derivation says X, assertion expects Y) is a real bug — a transcription error, a stale derivation, or a copy-paste. Deterministically evaluated; variables/units are skipped",
+        "params": {
+          "lang": "typescript",
+          "assertionSrcs": [
+            "\\.(?:toBe|toBeCloseTo|toEqual|toStrictEqual)\\(\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)",
+            "==\\s*(-?\\d+\\.\\d+)",
+            "assert\\.(?:strictEqual|deepStrictEqual|equal|deepEqual)\\(\\s*(?:[A-Za-z_$][\\w$.]*\\((?:[^()]|\\([^()]*\\))*\\)|[A-Za-z_$][\\w$.]*|-?\\d+(?:\\.\\d+)?)\\s*,\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)"
+          ]
+        },
+        "selfTest": {
+          "mustFlag": [
+            "expect(area(5)).toBe(80.0); // 3.14159 * 5 * 5 = 78.54",
+            "expect(fv).toBeCloseTo(1100.00); // 1000 * 1.05 ** 2 = 1102.50",
+            "assert.strictEqual(area(5), 80.0); // 3.14159 * 5 * 5 = 78.54"
+          ],
+          "mustNotFlag": [
+            "expect(area(5)).toBeCloseTo(78.54); // 3.14159 * 5 * 5 = 78.54",
+            "expect(x).toBe(3.5); // rate * count, see spec",
+            "expect(n).toBe(42);",
+            "expect(gain).toBeCloseTo(6.0206); // 20 * 0.30103 = 6.0206",
+            "assert.strictEqual(area(5), 78.54); // 3.14159 * 5 * 5 = 78.54",
+            "assert.strictEqual(roundTo(x, 2), 78.54); // 3.14159 * 5 * 5 = 78.54"
+          ]
+        }
+      },
+      {
+        "id": "js-assertion-consistency",
+        "kind": "assertionConsistency",
+        "description": "the same pure call asserted to two DIFFERENT literal values in one file is a contradiction — one test is wrong (a stale copy-paste expected, or a genuine disagreement). Deterministic; calls with variable args are skipped",
+        "params": {
+          "lang": "typescript",
+          "assertionSrcs": [
+            "expect\\(\\s*([A-Za-z_][\\w.]*\\([^()]*\\))\\s*\\)\\.(?:toBe|toEqual|toStrictEqual)\\(\\s*([^)]+?)\\s*\\)"
+          ]
+        },
+        "selfTest": {
+          "mustFlag": [
+            "expect(factorial(5)).toBe(120);\nexpect(factorial(5)).toBe(121);"
+          ],
+          "mustNotFlag": [
+            "expect(factorial(5)).toBe(120);\nexpect(factorial(5)).toBe(120.0);",
+            "expect(factorial(5)).toBe(120);\nexpect(factorial(6)).toBe(720);",
+            "expect(factorial(n)).toBe(120);\nexpect(factorial(n)).toBe(121);"
+          ]
+        }
+      },
+      {
+        "id": "js-fallback-collapse",
+        "kind": "fallbackCollapse",
+        "description": "Flags a compare-to-empty assertion (toEqual([])/toEqual({})/assert.deepEqual(...,[])) whose ACTUAL expression contains a `|| []`/`|| {}`/`?? []`/`?? {}` fallback upstream of the matcher, in the same statement, AND is CALL-DERIVED (the fallback operand contains a call, is chained into a call/method, or its base variable resolves to a call) — e.g. `assert.deepEqual((res.offenders || []).map(o => o.check), [])` launders an absent field into an empty result the assertion then matches. A fallback compared to a non-empty expected, one in a separate setup line, or one over a STATIC field with no call anywhere upstream (e.g. a parsed package.json read) is not flagged",
+        "params": {
+          "lang": "typescript"
+        },
+        "selfTest": {
+          "mustFlag": [
+            "assert.deepEqual((res.offenders || []).map(o => o.check), []);",
+            "expect(getOpts() ?? {}).toEqual({});"
+          ],
+          "mustNotFlag": [
+            "assert.deepEqual((res.offenders || []).map(o => o.check), ['x']);",
+            "const offenders = res.offenders || [];\nassert.deepEqual(offenders.map(o => o.check), []);",
+            "expect(packageJson.dependencies ?? {}).toEqual({});",
+            "const msg = `assert.deepEqual((res.offenders || []).map(o => o.check), []);`;"
+          ]
+        }
+      }
+    ]
+  },
+  "platform": {
+    "runtime": "claude-code"
+  }
+}

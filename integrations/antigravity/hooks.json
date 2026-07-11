@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {
+    "Stop": [
+      { "command": "npx --yes gutcheck gate --harness=antigravity", "timeout": 120 }
+    ]
+  }
+}

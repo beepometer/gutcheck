@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Stop hook (claude-code profile): when the agent finishes, run the mutation PROBE on the test files it
+# changed and, if any test passes even when the function it covers is gutted (proven HOLLOW), ask the
+# agent to fix it before finishing — the verify-as-you-write loop. Execution-proven only: it never blocks
+# on a static advisory or an inconclusive result, so a correction is always backed by "I broke the
+# function and this test still passed."
+#
+# ON by default: enabling the plugin is the consent, the probe is diff-scoped (an untouched repo
+# costs one git diff and exits in well under a second, no tests run), and a block needs receipted
+# evidence. Opt out per repo with a `.gutcheck-off` file, or globally with GUTCHECK_HOOK=off.
+# Fail-open: any error → exit 0, never blocks work.
+#
+# All the actual gate logic (opt-outs, baseline resolution, the diff-hash memo, the probe invocation,
+# verdict-to-message building) lives in mutation/gate.mjs behind a harness-adapter interface — this
+# script is just the claude-code Stop-hook wiring: it hands stdin straight through and execs node.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+GUTCHECK="${PLUGIN_ROOT}/mutation/gutcheck.mjs"
+
+[ -f "$GUTCHECK" ] || exit 0
+command -v node >/dev/null 2>&1 || exit 0
+exec node "$GUTCHECK" gate --harness=claude

@@ -1,0 +1,37 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -----------------------------< demo:mfeas >-----------------------------
+[INFO] Building mfeas 1.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ mfeas ---
+[WARNING] Using platform encoding (UTF-8 actually) to copy filtered resources, i.e. build is platform dependent!
+[INFO] skip non existing resourceDirectory /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/main/resources
+[INFO] 
+[INFO] --- compiler:3.11.0:compile (default-compile) @ mfeas ---
+[INFO] Changes detected - recompiling the module! :source
+[WARNING] File encoding has not been set, using platform encoding UTF-8, i.e. build is platform dependent!
+[INFO] Compiling 1 source file with javac [debug target 17] to target/classes
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR : 
+[INFO] -------------------------------------------------------------
+[ERROR] /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/main/java/demo/Calc.java:[2,98] incompatible types: java.lang.String cannot be converted to int
+[INFO] 1 error
+[INFO] -------------------------------------------------------------
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  0.326 s
+[INFO] Finished at: 2026-07-09T12:08:52+04:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile (default-compile) on project mfeas: Compilation failure
+[ERROR] /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/main/java/demo/Calc.java:[2,98] incompatible types: java.lang.String cannot be converted to int
+[ERROR] 
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException

@@ -1,0 +1,97 @@
+name: 'gutcheck'
+description: >-
+  Per-diff verification-coverage report for AI-generated changes: gutcheck breaks each changed function
+  and reruns only its own tests, classifying every changed function as proven, hollow, unverifiable, or
+  untested — with a replayable receipt per verdict. Fail-closed: what it cannot verify is reported, never guessed.
+author: 'beepometer'
+branding:
+  icon: 'check-circle'
+  color: 'orange'
+
+inputs:
+  path:
+    description: 'Project directory to probe.'
+    default: '.'
+  since:
+    description: 'Git ref that scopes the probe to the diff. Default: the PR base sha (falls back to HEAD~1). Use fetch-depth: 0 on checkout, or any ref reachable in the clone.'
+    default: ''
+  max-probes:
+    description: 'Cap on functions probed (bounds CI latency on a big diff).'
+    default: '40'
+  comment:
+    description: 'Post/update a sticky PR comment with the verification table (needs permissions: pull-requests: write).'
+    default: 'true'
+  sarif-file:
+    description: 'When set, write SARIF 2.1.0 here (upload with github/codeql-action/upload-sarif).'
+    default: ''
+  fail-on-hollow:
+    description: 'Fail the job when a hollow test is proven (a test that passes with its function gutted).'
+    default: 'true'
+  node-version:
+    description: 'Node version for the probe (needs >= 20; 22 recommended).'
+    default: '22'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # Probe ONCE with --json; every surface below renders from this saved result.
+    # Inputs reach the script through env, never inline ${{ }} interpolation into bash — the standard
+    # Actions script-injection hardening (values are data here, not code).
+    - id: probe
+      shell: bash
+      env:
+        IN_SINCE: ${{ inputs.since }}
+        IN_PATH: ${{ inputs.path }}
+        IN_MAX: ${{ inputs.max-probes }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+      run: |
+        SINCE="$IN_SINCE"
+        if [ -z "$SINCE" ] && [ -n "$PR_BASE" ]; then SINCE="$PR_BASE"; fi
+        [ -z "$SINCE" ] && SINCE='HEAD~1'
+        git -C "$IN_PATH" fetch --quiet --depth=1 origin "$SINCE" 2>/dev/null || true
+        set +e
+        node "$GITHUB_ACTION_PATH/mutation/gutcheck.mjs" "$IN_PATH" --json \
+          --since="$SINCE" --max-probes="$IN_MAX" --no-fallback > "$RUNNER_TEMP/gutcheck.json"
+        echo "probe-exit=$?" >> "$GITHUB_OUTPUT"
+        # Inline ::error (hollow) / ::warning (already-failing) annotations on the PR diff.
+        node '${{ github.action_path }}/ci/action-render.mjs' github "$RUNNER_TEMP/gutcheck.json"
+        # The verification table as the job summary, always.
+        node '${{ github.action_path }}/ci/action-render.mjs' markdown "$RUNNER_TEMP/gutcheck.json" >> "$GITHUB_STEP_SUMMARY"
+
+    # Sticky PR comment (create-or-update, keyed on the marker). Failure to comment is a warning, never a
+    # build failure — the annotations and summary above already carry the report.
+    - if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -e
+        BODY="$RUNNER_TEMP/gutcheck.md"
+        node '${{ github.action_path }}/ci/action-render.mjs' markdown "$RUNNER_TEMP/gutcheck.json" > "$BODY"
+        printf '\n<!-- gutcheck-report -->\n' >> "$BODY"
+        REPO='${{ github.repository }}'
+        PR='${{ github.event.pull_request.number }}'
+        CID=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          -q '.[] | select(.body | contains("<!-- gutcheck-report -->")) | .id' | head -1) || CID=""
+        if [ -n "$CID" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$CID" -F body=@"$BODY" > /dev/null
+        else
+          gh api "repos/$REPO/issues/$PR/comments" -F body=@"$BODY" > /dev/null
+        fi || echo "::warning::gutcheck: could not post the PR comment (add 'permissions: pull-requests: write')"
+
+    - if: ${{ inputs.sarif-file != '' }}
+      shell: bash
+      run: node '${{ github.action_path }}/ci/action-render.mjs' sarif "$RUNNER_TEMP/gutcheck.json" > '${{ inputs.sarif-file }}'
+
+    - if: ${{ inputs.fail-on-hollow == 'true' }}
+      shell: bash
+      run: |
+        H=$(node '${{ github.action_path }}/ci/action-render.mjs' count-hollow "$RUNNER_TEMP/gutcheck.json")
+        if [ "$H" -gt 0 ]; then
+          echo "gutcheck: $H hollow test(s) proven — failing per fail-on-hollow." >&2
+          exit 1
+        fi

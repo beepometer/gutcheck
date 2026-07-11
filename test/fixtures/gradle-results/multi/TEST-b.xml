@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="demo.BTest" tests="3" skipped="1" failures="0" errors="0" time="0.01">
+  <testcase name="testAlpha()" classname="demo.BTest" time="0.004"/>
+  <testcase name="testBeta()" classname="demo.BTest" time="0.004"/>
+  <testcase name="testGamma()" classname="demo.BTest" time="0.0">
+    <skipped/>
+  </testcase>
+</testsuite>

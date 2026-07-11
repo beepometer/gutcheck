@@ -1,0 +1,69 @@
+# Gutcheck's own CI — dogfood. The suite includes the probe/CLI/lint/hook tests, the checker
+# self-test meta-guard, and the dist no-drift + no-orphan gates. The live-harness-dependent tests
+# (fidelity + the live reconciliation oracles) skip-on-absent, so this stays green standalone.
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['20', '22']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '${{ matrix.node }}'
+      # The pytest-runner prove() e2es execute `python3 -m pytest` (HAS_PYTEST-gated: they skip when the
+      # module is absent). Runner images ship python3 WITHOUT pytest; setup-python's toolcache python takes
+      # PATH priority and pip-installs cleanly (the system python3 is externally-managed on ubuntu 24.04).
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python3 -m pip install --quiet pytest
+      - run: npm ci
+      - run: npm test
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python3 -m pip install --quiet pytest
+      - run: npm ci
+      - run: npm test
+  # JVM leg: a JDK makes the toolchain-gated Gradle/JUnit probe e2es EXECUTE (they skip on the legs
+  # above, which have no java). The Android testDebugUnitTest e2es stay skipped here (no Android SDK on
+  # the runner — Android is validated locally). The probe runs Gradle with `--offline`, so we warm the
+  # shared ~/.gradle cache with one online build of the vendored fixture FIRST; otherwise a fresh
+  # runner's offline resolve finds nothing and the e2es fail at the baseline. The Maven e2es (test/
+  # jvm-e2e.test.mjs, GUTCHECK_MVN-gated) get the same treatment: ubuntu-latest ships a `mvn` binary, we
+  # resolve its path (never hardcode — runner images can move it) and warm ~/.m2 the same way.
+  jvm:
+    runs-on: ubuntu-latest
+    env:
+      GUTCHECK_GRADLE_E2E: '1'   # opt the gradle e2es IN on this leg only (the others skip — cold offline cache)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '17' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python3 -m pip install --quiet pytest
+      - uses: gradle/actions/setup-gradle@v4
+      # `test` (not `testClasses`) so the full testRuntimeClasspath — incl. junit-jupiter-ENGINE, a runtime
+      # dep the compile-only task never resolves — lands in ~/.gradle for the probe's later `--offline` runs.
+      - name: Warm the Gradle cache for the offline probe e2es
+        run: cd test/fixtures/jvm-project && java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain test --console=plain
+      - name: Resolve mvn and opt the Maven e2es in for this leg
+        run: echo "GUTCHECK_MVN=$(command -v mvn)" >> "$GITHUB_ENV"
+      - name: Warm the local Maven repo for the offline probe e2es
+        run: cd test/fixtures/maven-project && mvn -q test
+      - name: Warm the local Maven repo for the reactor (multi-module) probe e2e
+        run: cd test/fixtures/maven-reactor && mvn -q test
+      - run: npm ci
+      - run: npm test

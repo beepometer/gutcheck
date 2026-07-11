@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# SessionStart hook for the Gutcheck plugin (claude-code profile). Two duties with different gates:
+#   1. ALWAYS (unless .gutcheck-off / GUTCHECK_HOOK=off): record the session-start HEAD to
+#      <git-dir>/gutcheck-baseline so the Stop hook can probe everything the agent touched this
+#      session — committed or not. Compute-only, no context cost. compact fires MID-task, so the
+#      baseline is never moved then (a moved baseline would hide pre-compact commits from the probe).
+#   2. Only when a .gutcheck marker contains a `session-skill` line: inject the check skill as session
+#      context (headless/autonomous self-activation). Context injection costs the user's tokens, so it
+#      stays opt-in — the dividing line between the two gates.
+# Fail-open: never block a session.
+set -euo pipefail
+INPUT="$(cat 2>/dev/null || true)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DIR="$(pwd -P)"
+
+[ -f "$DIR/.gutcheck-off" ] && exit 0   # opt-out disables everything
+[ "${GUTCHECK_HOOK:-}" = "off" ] && exit 0
+
+SOURCE=""
+if command -v node >/dev/null 2>&1; then
+  SOURCE="$(printf '%s' "$INPUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).source||""))}catch{process.stdout.write("")}})' 2>/dev/null || true)"
+fi
+
+# 1. baseline (skip on compact — mid-task, HEAD may already contain this session's commits)
+if [ "$SOURCE" != "compact" ]; then
+  GITDIR="$(git -C "$DIR" rev-parse --git-dir 2>/dev/null || true)"
+  if [ -n "$GITDIR" ]; then
+    case "$GITDIR" in /*) ;; *) GITDIR="$DIR/$GITDIR" ;; esac
+    git -C "$DIR" rev-parse HEAD > "$GITDIR/gutcheck-baseline" 2>/dev/null || true
+  fi
+fi
+
+# 2. skill injection — opt-in via a `session-skill` line in a .gutcheck marker (context costs tokens)
+grep -qs '^session-skill$' "$DIR/.gutcheck" || exit 0
+SKILL="${PLUGIN_ROOT}/skills/check/SKILL.md"
+content="$(cat "$SKILL" 2>/dev/null || true)"
+if [ -z "$content" ]; then exit 0; fi
+
+# JSON-escape via bash parameter substitution; backslash first so later passes
+# do not double-escape it (escape backslashes before quotes).
+escape_for_json() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+escaped="$(escape_for_json "$content")"
+ctx="<gutcheck-skill>\nThe Gutcheck verification discipline is loaded. Run the deterministic checker and repair what it flags at the source; build oracles independently, verify citations, and run a fresh check before any 'it passes' claim. The check skill follows in full.\n\n${escaped}\n</gutcheck-skill>"
+printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$ctx"
+exit 0

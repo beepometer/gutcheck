@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="demo.CalcTest" tests="1" skipped="0" failures="0" errors="1" time="0.01">
+  <testcase name="testDivide()" classname="demo.CalcTest" time="0.004">
+    <error message="/ by zero" type="java.lang.ArithmeticException">java.lang.ArithmeticException: / by zero
+	at demo.CalcTest.testDivide(CalcTest.java:20)
+</error>
+  </testcase>
+</testsuite>

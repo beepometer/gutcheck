@@ -1,0 +1,5 @@
+{
+  "agentStop": [
+    { "type": "command", "command": ["npx", "--yes", "gutcheck", "gate", "--harness=copilot"] }
+  ]
+}

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Gutcheck pre-push gate: run the fast coherence check before sharing.
+# Bypass (deliberate) with `git push --no-verify`.
+ROOT="$(git rev-parse --show-toplevel)" || exit 0
+if [ -x "$ROOT/scripts/gate.sh" ]; then
+  if ! "$ROOT/scripts/gate.sh"; then
+    echo ""
+    echo "x Gutcheck gate failed — push aborted."
+    echo "  Run ./scripts/gate.sh to see why, or 'git push --no-verify' to override."
+    exit 1
+  fi
+fi
+exit 0

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="demo.CalcTest" tests="1" skipped="0" failures="1" errors="0" time="0.01">
+  <testcase name="testAdd()" classname="demo.CalcTest" time="0.004">
+    <failure message="expected:&lt;3&gt; but was:&lt;4&gt;" type="org.opentest4j.AssertionFailedError">org.opentest4j.AssertionFailedError: expected:&lt;3&gt; but was:&lt;4&gt;
+	at demo.CalcTest.testAdd(CalcTest.java:12)
+</failure>
+  </testcase>
+</testsuite>
