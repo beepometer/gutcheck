@@ -112,13 +112,15 @@ false` reports without failing.
 
 **3 functions changed** · proven 1 · hollow 1 · unverifiable 0 · untested 1
 
+*probed 3 fns · 1/2 bound · 0 tests skipped · runner node*
+
 | Function | File | Status | Evidence |
 | --- | --- | --- | --- |
 | `countItems` | src/cart.mjs | proven | test/cart.test.mjs:7 'counts items' went red when gutted |
 | `computeTotal` | src/cart.mjs | hollow | test/cart.test.mjs:9 'computes the total' still passes when gutted |
 | `applyDiscount` | src/cart.mjs | untested | no test mentions it |
 
-*Evidence classes: **proven/hollow** are execution-backed (we mutated the function and reran its test). **unverifiable/untested** are name-search (a same-named function elsewhere can confuse them). Only value-pinning tests with locatable functions are probeable — skipped tests are counted in the default report and `--json` output.*
+*Evidence classes: **proven/hollow** are execution-backed (we mutated the function and reran its test). **unverifiable/untested** are name-search (a same-named function elsewhere can confuse them). Only value-pinning tests with locatable functions are probeable — the per-reason skip breakdown is in the default report and `--json` output.*
 
 </details>
 
