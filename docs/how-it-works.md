@@ -1,7 +1,8 @@
 # How it works
 
-Mutation testing restricted to one mutant per function (a wrong constant return) and one test
-rerun per mutant — fast enough to run on every change. Verdicts come from parsed runner summaries
+Mutation testing restricted to whole-body mutants — a wrong constant return, at most two per
+function (the second confirms a would-be hollow from the opposite sign) — and one targeted test
+rerun per mutant: fast enough to run on every change. Verdicts come from parsed runner summaries
 and JUnit XML, never from exit codes.
 
 ## Scoping the probe
@@ -15,10 +16,10 @@ Under a probe cap, test files changed in the diff are probed first.
 
 ## Fail-closed throughout
 
-- A changed test that already fails is reported separately — it verifies nothing until it passes.
+- A changed test that already fails is reported separately—it verifies nothing until it passes.
 - A test that never ran (skipped, zero-match selection, timeout) is did-not-run, never an
   accusation.
-- A mutant survival triggers a flake re-check — a rerun with the function restored — before any
+- A mutant survival triggers a flake re-check (rerun with the function restored) before any
   hollow verdict.
 - A surviving test is also re-gutted with the opposite-signed sentinel before the accusation:
   hollow means green under both directions; red under exactly one reads one-sided (a verdict,
@@ -50,7 +51,7 @@ runs inline; untested is a reference scan that found nothing to cite.
 | unverifiable | tests reference it, but the probe could not verify any of them — a limit of the probe, not proof the tests are weak | no value-pinning assertion, the function cannot be located from the test's imports, or the referencing test is itself inconclusive; each test's reason is in the JSON, the dominant one in the report |
 | untested | no test mentions it | reference scan over the test files in scope |
 
-`proven` means the tests bind the function, not that the code is correct — a test can pin a wrong
+`proven` means the tests bind the function, not that the code is correct: a test can pin a wrong
 value and still bind.
 
 ## Cost

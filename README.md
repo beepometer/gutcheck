@@ -30,17 +30,10 @@ It runs in three places, same verdicts on every surface:
 
 Every changed function takes one path through the probe:
 
-```mermaid
-flowchart TD
-    F["function changed in the diff"] --> N{"a test<br/>names it?"}
-    N -- "no" --> U["untested"]
-    N -- "yes, but not probeable" --> V["unverifiable"]
-    N -- "yes, probeable" --> G["replace its body with a wrong constant<br/>and rerun only its test"]
-    G -- "test goes red" --> P["proven"]
-    G -- "test stays green" --> G2["same check with an<br/>opposite-signed wrong constant"]
-    G2 -- "goes red" --> O["one-sided"]
-    G2 -- "stays green" --> H["hollow"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/verdict-flow-dark.svg">
+  <img alt="verdict flow: a changed function with no test is untested; named but not probeable is unverifiable; probeable functions get their body replaced with a wrong constant and only their test rerun — red means proven, green triggers the same check with an opposite-signed constant — red there means one-sided, green under both means hollow" src="docs/assets/verdict-flow-light.svg">
+</picture>
 
 | Verdict | Meaning | Blocks the gate? |
 |---|---|---|
@@ -190,30 +183,28 @@ Every flag, the exit-code contract (0 clean · 1 hollow found · 2 usage error),
 | Python | pytest |
 | Kotlin / Java + Android | Gradle (JUnit 4/5, kotlin.test, AssertJ; `testDebugUnitTest`, incl. Robolectric); Maven (JUnit 4/5, single- and multi-module) |
 
-**Strongest fit** — code whose tests pin concrete values:
+**Strongest fit**—code whose tests pin concrete values:
 
-- calculation-heavy logic: pricing, scoring, physics, signal processing, unit conversion — anything
+- calculation-heavy logic: pricing, scoring, physics, signal processing, unit conversion—anything
   checked against published reference values
-- parsers, formatters, serializers, validators — pure functions with literal expectations
-- test suites written or maintained by coding agents, where "looks tested" is exactly what needs
-  verifying
+- parsers, formatters, serializers, validators—pure functions with literal expectations
 - large, slow suites: the probe is diff-scoped and reruns only the covering test, so total suite
   runtime doesn't matter
 
-**Thin fit** — the probe reaches little, and says so:
+**Thin fit**—the probe reaches little:
 
 - mock-, dependency-injection-, and UI-heavy code: few functions are probeable, so the report's
   value is the untested/unverifiable denominator rather than proven/hollow verdicts
 - suites that assert relations or behavior without ever pinning a value
-- instrumented Android tests (`androidTest`) and Kotlin Multiplatform native/JS targets —
-  unsupported, reported as such rather than guessed
+- instrumented Android tests (`androidTest`) and Kotlin Multiplatform native/JS targets—
+unsupported, reported as such rather than guessed
 
 Full detail: [scope and limits](docs/limits.md).
 
 ## Prior art and license
 
 Mutation testing is old and good; PIT, Stryker, and mutmut are full-strength implementations. The
-gut-the-whole-body restriction is "extreme mutation", published as pseudo-tested methods
+gut-the-whole-body restriction is 'extreme mutation', published as pseudo-tested methods
 ([Niedermayr et al., 2016](https://arxiv.org/abs/1611.07163)) and shipped for the JVM as PIT's
 [Descartes](https://github.com/STAMP-project/pitest-descartes) plugin. What Gutcheck adds is the
 per-diff verdict report at the agent's done-claim, fail-closed discipline, per-test targeted

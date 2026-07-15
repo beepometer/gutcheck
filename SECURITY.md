@@ -28,7 +28,7 @@ The security-relevant surface:
 - Pin `uses: beepometer/gutcheck@...` to a released tag or a full commit SHA rather than a mutable
   ref.
 
-The action's `fail-on-hollow` input (default `'true'` — see [action.yml](action.yml)) can be set to
+The action's `fail-on-hollow` input (default `'true'`—see [action.yml](action.yml)) can be set to
 `'false'` for an advisory-only mode that reports without failing the job.
 
 ## Reporting a vulnerability

@@ -2,7 +2,7 @@
 
 ## Running it safely
 
-The probe runs the project's own tests, and therefore its code — point it only at repositories
+The probe runs the project's own tests, and therefore its code—point it only at repositories
 whose tests you would run anyway.
 
 The same rule decides how you wire the CI action. Run it on `pull_request`, where fork PRs run
@@ -17,8 +17,8 @@ hook yields to a CLI sweep the same way). A lock left by a dead process clears i
 ## What the probe can reach
 
 A test is probed only if it pins a concrete value and the tested function can be located from the
-test file's imports. Direct calls and constructed instances both resolve — inline (`new X().m()` /
-`X().m()`) or via a variable — across JS/TS, Kotlin/Java, and Python; ambiguous or
+test file's imports. Direct calls and constructed instances both resolve inline (`new X().m()` /
+`X().m()`) or via a variable across JS/TS, Kotlin/Java, and Python; ambiguous or
 mock-constructed receivers are skipped, never guessed. Tests importing build output such as `dist/`
 are typically unverifiable — build output is never mutated.
 
@@ -35,16 +35,16 @@ assuming all of it — but raising `--max-probes`/`--time-budget` past a complet
 ## Sentinel direction on threshold logic
 
 The gut rewrites a function to return one extreme sentinel (`987654321` and typed variants). On
-one-sided comparison logic — thresholds, clamps, pass/fail cutoffs — a single-sentinel verdict is
+one-sided comparison logic (thresholds, clamps, pass/fail cutoffs) a single-sentinel verdict is
 therefore direction-relative: a test that exercises only one side of a cutoff can read hollow under
 the huge sentinel yet would go red under a negative one, and vice versa. A plain-run `proven` on
-threshold logic means the test detects the sentinel's direction of error — weaker evidence than a
+threshold logic means the test detects the sentinel's direction of error—weaker evidence than a
 `proven` on an equality pin.
 
 Every run confirms an accusation before minting it: a test that survives the gut is re-gutted with
 the opposite-signed sentinel, and `hollow` is reported only when it stays green under **both**
-directions — red under exactly one is **one-sided**, a real verdict (the test binds one direction
-of error) that never blocks. Survivors are rare, so the confirmation costs almost nothing — the
+directions—red under exactly one is **one-sided**, a real verdict (the test binds one direction
+of error) that never blocks. Survivors are rare, so the confirmation costs almost nothing: the
 extra run is paid exactly when an accusation is at stake. Two complementary one-sided tests, one
 per direction, jointly bind the function. A function with no opposite mutant (the string sentinel,
 a compile-failing opposite) keeps its single-sentinel verdict — no evidence, no reclassification.
@@ -71,7 +71,7 @@ isolation whose reactor siblings aren't installed to the local repo fails to bui
 read as no results — an under-reach, never a wrong verdict.
 
 **Not supported:** Kotlin Multiplatform native and JS target test sets (and `commonTest` in a
-module with no JVM target), and instrumented Android tests — `androidTest` reports `unverifiable —
+module with no JVM target), and instrumented Android tests—`androidTest` reports `unverifiable —
 needs a device/emulator`. Unsupported Gradle source sets are skipped with an explicit reason before
 any test run, never guessed at.
 

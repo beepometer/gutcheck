@@ -6,10 +6,10 @@ charter lives in [CLAUDE.md](CLAUDE.md). Read it before a non-trivial change.
 ## Prerequisites
 
 - **Node 20+** (the probe, the checker, the build, and the tests are all Node).
-- `npm install` — Gutcheck has zero dependencies, so this is a no-op; run it anyway to get a clean
+- `npm install`—Gutcheck has zero dependencies, so this is a no-op; run it anyway to get a clean
   `package-lock.json`.
 
-## The gates — keep them green
+## Keep the gates green
 
 Every change must pass:
 
@@ -26,7 +26,7 @@ Every change must pass:
 intermediate build step to keep in sync. Then rebuild the plugin:
 
 1. Edit `skills/check/SKILL.md` or `agents/citation-verifier.md`.
-2. Rebuild the plugin: `npm run build:plugin` — it copies the source dirs verbatim into `dist/gutcheck`
+2. Rebuild the plugin: `npm run build:plugin`—it copies the source dirs verbatim into `dist/gutcheck`
    and stamps `.claude-plugin/plugin.json` from `package.json`.
 
 Never hand-edit anything under `dist/` — it is generated. After any edit that renames a heading or

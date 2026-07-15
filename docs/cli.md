@@ -31,7 +31,7 @@ gutcheck [path] --deep            costlier evidence, same coverage — roughly d
 
 ## Exit codes
 
-`0` on a clean run — no hollow test proven, including a run the environment aborted (a broken build
+`0` on a clean run—no hollow test proven, including a run the environment aborted (a broken build
 or wrong runner shows up as a stated reason in the report, not a failure code). `1` when at least
 one hollow test is proven. `2` on a scope or usage error (bad path, unknown flag, an unresolved
 `--since` with nothing to fall back to).
@@ -55,12 +55,12 @@ test/cart.test.mjs:9 'computes the total'
 Four static checks in under a second on JavaScript/TypeScript test files (Python gets three —
 fallback collapse is JS/TS-only):
 
-- **derivation coherence** — a comment deriving an expected value disagrees with the value the
+- **derivation coherence**—a comment deriving an expected value disagrees with the value the
   assertion pins.
-- **fallback collapse** — a compare-to-empty assertion whose actual value passes through `|| []`
+- **fallback collapse**—a compare-to-empty assertion whose actual value passes through `|| []`
   or `?? {}`.
-- **assertion consistency** — assertions within one test that contradict each other.
-- **test-shape guards** — length tautologies and time/random leaks.
+- **assertion consistency**—assertions within one test that contradict each other.
+- **test-shape guards**—length tautologies and time/random leaks.
 
 Each check validates itself against planted fixtures on every run; precision-tuned, so zero
 findings is the normal result on a healthy repo. The lint flags badly shaped tests; it does not
