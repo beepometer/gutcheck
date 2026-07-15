@@ -32,7 +32,7 @@ Every changed function takes one path through the probe:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/verdict-flow-dark.svg">
-  <img alt="verdict flow: a changed function with no test is untested; named but not probeable is unverifiable; probeable functions get their body replaced with a wrong constant and only their test rerun — red means proven, green triggers the same check with an opposite-signed constant — red there means one-sided, green under both means hollow" src="docs/assets/verdict-flow-light.svg">
+  <img alt="verdict flow: a changed function with no test is untested; named but not probeable is unverifiable; probeable functions get their body replaced with a wrong constant and only their test rerun—red means proven, green triggers the same check with an opposite-signed constant—red there means one-sided, green under both means hollow" src="docs/assets/verdict-flow-light.svg">
 </picture>
 
 | Verdict | Meaning | Blocks the gate? |
@@ -49,7 +49,7 @@ probe from ever inventing one, are in [how it works](docs/how-it-works.md).
 
 ## Gate the agent loop
 
-One shared gate (`gutcheck gate --harness=<name>`) runs at the agent's done-claim — the moment the
+One shared gate (`gutcheck gate --harness=<name>`) runs at the agent's done-claim—the moment the
 agent declares the task finished. Claude Code ships it as a default-on plugin:
 
 ```
@@ -65,7 +65,7 @@ non-blocking coverage line spoken back into the loop:
 gutcheck: of 3 function(s) you changed — 1 proven, 2 with no binding test. (npx gutcheck --explain <file:line> for a receipt.)
 ```
 
-The gate blocks the done-claim — once — only on two execution-backed signals: a hollow test, or a
+The gate blocks the done-claim—once—only on two execution-backed signals: a hollow test, or a
 changed test that already fails before any mutation runs. Each finding names its receipt, and for
 a failing test, the runner's own failure text:
 
@@ -75,7 +75,7 @@ a failing test, the runner's own failure text:
 
 Untested or unverifiable functions never block. The probe is diff-scoped, capped (20 functions,
 90 seconds), and memoized per diff; a stop that touched nothing costs a git diff plus the
-self-check — a few seconds the first time, about half a second on memoized repeats. Hooks are bash
+self-check—a few seconds the first time, about half a second on memoized repeats. Hooks are bash
 and run on macOS and Linux. Caps, cost, the context hooks, and the opt-outs (`.gutcheck-off`,
 `GUTCHECK_HOOK=off`) are in [hooks/README.md](hooks/README.md).
 
@@ -84,7 +84,7 @@ template you register yourself—none is installed by default. Mechanism, instal
 honest boundaries for each are in [integrations/README.md](integrations/README.md); the opt-outs
 are shared across every harness. The Claude Code plugin also adds `/gutcheck:check` and an opt-in
 read-only citation-verifier agent (it checks that cited sources actually say what the agent
-claims — the same trust problem, applied to prose).
+claims—the same trust problem, applied to prose).
 
 To use a clone without installing: `claude --plugin-dir <repo>/dist/gutcheck`. Verdicts are the
 same on every surface, so an agent and a reviewer read the same report.
@@ -108,7 +108,7 @@ verification table. It fails the job by default when a hollow test is found; `fa
 false` reports without failing.
 
 <details>
-<summary>What the sticky PR comment looks like — real <code>--format=markdown</code> output on the README's cart example (excerpt)</summary>
+<summary>What the sticky PR comment looks like—real <code>--format=markdown</code> output on the README's cart example (excerpt)</summary>
 
 **3 functions changed** · proven 1 · hollow 1 · unverifiable 0 · untested 1
 
@@ -125,7 +125,7 @@ false` reports without failing.
 </details>
 
 Inputs: `path`, `since`, `max-probes` (defaults to 40), `comment`, `sarif-file`, `fail-on-hollow`,
-`node-version` — see [action.yml](action.yml). For full control, copy
+`node-version`—see [action.yml](action.yml). For full control, copy
 [`ci/gutcheck.yml`](ci/gutcheck.yml) into `.github/workflows/`.
 
 The probe executes your project's own test suite. Run it on `pull_request`, as above, and never on
@@ -141,7 +141,7 @@ npx gutcheck --demo                # planted two-test example, a catch in second
 npx gutcheck --since origin/main   # probe your diff
 ```
 
-The report on a real diff — three changed functions, two tests, all green in CI:
+The report on a real diff—three changed functions, two tests, all green in CI:
 
 ```console
 $ npx gutcheck --since origin/main
@@ -158,7 +158,7 @@ no binding test — no test names it (1):
   (probed 2 fns · 1/2 bound · 0 skipped · runner node)
 ```
 
-*countItems is proven (gutting it made its test go red) so it gets no line of its own — only
+*countItems is proven (gutting it made its test go red) so it gets no line of its own—only
 problems do. computeTotal's test computes its expected value from computeTotal itself, so it
 survives gutting: hollow. applyDiscount has no test at all. The first line is gutcheck checking
 itself: it plants a fake test and a real one in a scratch directory and refuses to run unless it
