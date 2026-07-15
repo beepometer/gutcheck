@@ -4,6 +4,14 @@ All notable changes to Gutcheck are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-07-15
+
+- The CI markdown surface (sticky PR comment, job summary) carries the probe mechanics — probed
+  functions, bound ratio, tests skipped, runner — under the verdict summary, so a reader deciding
+  how much to trust the gate as coverage sees the denominator at a glance.
+- The README's verdict flow chart ships as committed light/dark SVGs — the GitHub mobile app
+  renders no mermaid.
+
 ## [0.3.1] — 2026-07-15
 
 - The default diff report renders whole-scope hollow findings: previously the headline could read
