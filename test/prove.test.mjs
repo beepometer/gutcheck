@@ -2968,8 +2968,10 @@ test('formatReport diff mode: pin-unresolved renders its honest message, never t
 // unscoped run on a large repo ground CPU for 20+ minutes with zero probes, zero output, and the budget
 // never consulted — the skip paths `continue` before reaching the check. Once the budget is exhausted,
 // every remaining block must be recorded probe-cap WITHOUT running eligibility. Oracle hand-derived:
-// with a 1ms budget (guaranteed exhausted before block 1 — work-copy setup alone exceeds it), BOTH
-// blocks cap; under the old code the weak block still went through classification (skipped/no-pin).
+// a NEGATIVE budget is already in the past when the first check runs (truthy, and elapsed >= -1 always),
+// so BOTH blocks cap deterministically on any machine — a 1ms budget flaked on a fast CI runner whose
+// work-copy setup finished inside the millisecond, letting block 1 legally through eligibility.
+// Under the old code the weak block still went through classification (skipped/no-pin).
 test('prove: an exhausted time budget caps remaining blocks before analysis — never a silent grind', () => {
   const d = project({
     'package.json': '{"type":"module"}',
@@ -2980,7 +2982,7 @@ test('prove: an exhausted time budget caps remaining blocks before analysis — 
       "test('weak', () => { assert.ok(isPositive(5)); });\n" +
       "test('sound', () => { assert.strictEqual(add(2, 3), 5); });\n",
   });
-  const r = prove(d, { runner: 'node', timeBudgetMs: 1 });
+  const r = prove(d, { runner: 'node', timeBudgetMs: -1 });
   assert.equal(r.probes, 0, 'no probe ever started');
   assert.equal(r.capped, 2, 'both blocks report probe-cap — analysis itself is bounded');
   assert.equal(r.skipped.length, 0, 'no block reached eligibility classification after exhaustion');
