@@ -1,7 +1,7 @@
 name: 'gutcheck'
 description: >-
   Per-diff verification-coverage report for AI-generated changes: gutcheck breaks each changed function
-  and reruns only its own tests, classifying every changed function as proven, hollow, unverifiable, or
+  and reruns only its own tests, classifying every changed function as proven, hollow, one-sided, unverifiable, or
   untested — with a replayable receipt per verdict. Fail-closed: what it cannot verify is reported, never guessed.
 author: 'beepometer'
 branding:

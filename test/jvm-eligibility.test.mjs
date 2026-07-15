@@ -5,7 +5,7 @@
 // no-lang default path (what every pre-existing JS/py call site uses) is left untouched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBlocks, eligibleFns } from '../mutation/prove.mjs';
+import { parseBlocks, eligibleFns, eligibleFnsDetail } from '../mutation/prove.mjs';
 import { sutFnsIn } from '../mutation/confirm.mjs';
 
 const KT = `package demo
@@ -396,4 +396,34 @@ class T {
   const blocks = parseBlocks(src, 'java');
   assert.deepEqual(blocks.map((blk) => blk.name), ['demo.T.t']);
   assert.ok(blocks[0].body.includes('foo()'));
+});
+
+// ---- eligibleFnsDetail: the pin/eligibility split (public issue #3). A Kotlin destructuring declaration
+// `val (a, b) = call()` is invisible to the val-hop (its LHS is not a single identifier), so the fn is not
+// eligible — but the block DID pin literals, and reporting it 'no-pin' ("only checks a mock / no value
+// pinned") asserts a property of the test the probe never established. The detail form states both facts
+// separately so the caller can say "a pin exists; the scanner can't link it" instead. Oracle hand-derived
+// from the source text (5.0f/4.8f are literal pins; no hop shape links lengthM to boundingBoxM).
+test('eligibleFnsDetail kotlin: destructuring val — pins recognized (hadPin) but no eligible link', () => {
+  const body = `val (lengthM, widthM) = Geometry2.boundingBoxM(lShape)
+assertEquals(5.0f, lengthM, 1e-4f)
+assertEquals(4.8f, widthM, 1e-4f)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, [], 'destructuring LHS: the val-hop cannot link the pinned vars');
+  assert.equal(d.hadPin, true, 'the literal pins are real and must be stated as found');
+});
+
+test('eligibleFnsDetail kotlin: plain val-hop still links, hadPin true (control)', () => {
+  const body = `val area = computeArea(sq)
+assertEquals(12.0f, area, 1e-4f)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, ['computeArea']);
+  assert.equal(d.hadPin, true);
+});
+
+test('eligibleFnsDetail: a weak-only body has no pin at all — hadPin false (no-pin stays honest)', () => {
+  const body = 'assertTrue(isPositive(5))';
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, []);
+  assert.equal(d.hadPin, false);
 });

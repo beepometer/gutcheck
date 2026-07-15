@@ -5,7 +5,7 @@
     {
       "name": "gutcheck",
       "source": "./dist/gutcheck",
-      "version": "0.2.0",
+      "version": "0.3.1",
       "description": "Prove your AI-written tests actually test your code. Gutcheck guts each tested function with a guaranteed-wrong return and reports which tests don't notice — a mutation score plus the exact hollow tests — backed by a self-testing deterministic checker. Runs in the agent loop, the CLI, and CI."
     }
   ]

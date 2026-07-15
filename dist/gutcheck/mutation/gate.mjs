@@ -368,7 +368,12 @@ export function runGate({ harnessName, dir, stdinText, env = {} }) {
         GUTCHECK_PATH, realDir, '--json', '--no-fallback', `--since=${baseline}`, '--max-probes=20', '--time-budget=90',
       ], { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
     } catch (e) { json = (e && e.stdout) ? e.stdout.toString() : ''; }
-    if (json) writeMemo(memo, memoKey, json);
+    // Never memoize a run that didn't happen: a scopeError payload (probe-lock refusal, unresolvable
+    // scope) cached under this diff-hash would suppress every later gate on the same diff. Unparseable
+    // output is equally uncacheable — never-cache-empty extends to never-cache-broken. The payload still
+    // flows to buildVerdict below, which yields on it (no hollow rows → no block).
+    let ranReal = false; try { ranReal = !JSON.parse(json).scopeError; } catch {}
+    if (json && ranReal) writeMemo(memo, memoKey, json);
   }
   if (!json) return null;
 

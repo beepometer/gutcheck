@@ -4,6 +4,41 @@ All notable changes to Gutcheck are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-07-15
+
+- The default diff report renders whole-scope hollow findings: previously the headline could read
+  "0 hollow" while the exit code counted a hollow beyond the changed functions (#1).
+- Unverifiable reasons state only established facts: a test that pins a value the probe can't tie
+  to a called function reports `pin-unresolved`, split from `no-pin`; execution-observed evidence
+  outranks static reads on rollup ties (#3).
+- Every skip reason is itemized in the banner — the itemized counts always sum to the skipped
+  total, and an unrecognized reason code renders verbatim instead of being dropped.
+- The full-scan headline leads with the coverage denominator ("verdicts on X of Y tests") whenever
+  tests were skipped or inconclusive, so the one-line summary can never read as a whole-suite claim.
+- `--time-budget` now bounds the analysis phase too, not just probing; a whole-repo scan can no
+  longer run unbounded before the first probe.
+- One probe per repository at a time: a run that finds another gutcheck probe active on the same
+  repo refuses with a stated reason (the agent hook yields silently and never memoizes the
+  refusal); a lock left by a dead process clears itself.
+- Hollow is confirmed before it is reported: a test that survives the gut is re-gutted with the
+  opposite-signed sentinel, and `hollow` now means green under **both** directions. Red under
+  exactly one is **one-sided** — a new non-blocking verdict tier for threshold/comparison oracles
+  (two complementary one-sided tests jointly bind the function). Survivors are rare, so the
+  confirmation is near-free; an accusation can never be a sentinel-sign accident.
+- `--deep` extends both-sentinel evidence to the proven side (a one-direction-only proof demotes
+  to one-sided) and adds the identity-stub advisory, now suppressed for functions with a
+  production identity branch, where surviving the stub is expected. `--deep` and the
+  sentinel-direction limit are now documented.
+- The probe fail-fasts on a broken environment: once the first 10 baseline runs in a pass have all
+  failed with none passing, the rest are recorded as not-probed (`env-abort`) instead of run one by
+  one to a guaranteed-inconclusive result; the report states the abort and the remaining count.
+- A `--json`/`--format` report larger than the 64KB pipe buffer no longer reaches machine consumers
+  truncated with exit 0 (process.exit discarded undrained stdout; the agent hook and CI read through
+  pipes and would have failed open on a parse error).
+- Root-module Kotlin Multiplatform repos (tests at `src/jvmTest/` with no module prefix) now select
+  the `jvmTest` task; the unanchored path match previously fell through to the nonexistent `test`
+  task and read the whole repo as did-not-run.
+
 ## [0.3.0] — 2026-07-10
 
 - A skipped or never-ran test no longer reads as "already failing" and can no longer block a diff
@@ -32,9 +67,8 @@ All notable changes to Gutcheck are documented here. The format follows
 - Finishing a turn over a still-flagged hollow (or already-failing) test emits a non-blocking
   `systemMessage` naming the unfixed test(s) — memo-backed, never re-probed, silent once the diff
   changes.
-- The Stop-hook gate is extracted into `mutation/gate.mjs` (`gutcheck gate --harness=<name>`)
-  behind a harness-adapter interface; the Claude Code plugin's bash hook is now a thin caller over
-  it — behavior-neutral for Claude Code, byte-identical block/voice/residue messages.
+- The Stop-hook gate is a CLI surface (`gutcheck gate --harness=<name>`) behind a harness-adapter
+  interface, so any agent harness can call the same gate the Claude Code plugin uses.
 - Codex CLI gets an in-loop gate: a protocol-twin `Stop` hook (`{decision:"block",reason}`, the
   same `stop_hook_active` loop guard as Claude Code), shipped as an integration template
   (`integrations/codex/`).
@@ -53,8 +87,8 @@ All notable changes to Gutcheck are documented here. The format follows
 
 ## [0.2.1] — 2026-07-08
 
-- README audited end-to-end (seven-agent claim review, launch pre-mortem, blunder pass): the
-  flagship example, the plugin section, and the opening now match the tool as shipped.
+- README corrected end-to-end: the flagship example, the plugin section, and the opening now match
+  the tool as shipped.
 - Reader-facing output surfaces use single quotes consistently.
 - Maven repos fail closed at the probe entry point instead of falling through to the node runner
   and drowning the report in inconclusive noise.

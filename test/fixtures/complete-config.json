@@ -1,6 +1,6 @@
 {
   "identity": {
-    "projectName": "AcoustiQ",
+    "projectName": "SampleApp",
     "productName": "DemoApp",
     "slugPrefix": "demo-",
     "legacySlugs": [
@@ -18,7 +18,7 @@
     "buildSuccessLine": "BUILD SUCCESSFUL",
     "resultsDir": "app/build/test-results/testDebugUnitTest",
     "longRunningCmd": "./gradlew",
-    "check": "./gradlew --no-daemon testDebugUnitTest --tests \"*DemoConsistencyTest\" --tests \"*WorkflowDisciplineTest\" --tests \"com.roomacoustics.guard.*\""
+    "check": "./gradlew --no-daemon testDebugUnitTest --tests \"*DemoConsistencyTest\" --tests \"*WorkflowDisciplineTest\" --tests \"com.example.sampleapp.guard.*\""
   },
   "language": {
     "fileExt": ".kt",
@@ -41,10 +41,10 @@
   "paths": {
     "srcRoots": {
       "main": [
-        "app/src/main/java/com/roomacoustics"
+        "app/src/main/java/com/example/sampleapp"
       ],
       "test": [
-        "app/src/test/java/com/roomacoustics"
+        "app/src/test/java/com/example/sampleapp"
       ]
     }
   },
@@ -148,8 +148,8 @@
         "params": {
           "lang": "kotlin",
           "excludePathSubstrings": [
-            "com/roomacoustics/guard/",
-            "com/roomacoustics/harness/"
+            "com/example/sampleapp/guard/",
+            "com/example/sampleapp/harness/"
           ],
           "rules": [
             {

@@ -458,6 +458,38 @@ export function grossBreak(code, fn, lang) {
   return code.slice(0, loc.start) + loc.make(gutValueFor(loc.returnType, lang)) + code.slice(loc.end);
 }
 
+// Identity-stub suppression predicate (--deep): a function with a legitimate first-param identity
+// branch in production (`return label`, `?: label`, `else a`, `-> n`, a ternary arm) makes an identity
+// stub INDISTINGUISHABLE from correct behavior on that branch's inputs — the tests asserting the branch
+// survive the stub by construction (field-observed: 5/5 advisories on one wild run were exactly this).
+// Detection is deliberately loose (scanned on comment/string-masked body text): a false match only hides
+// an advisory, never mints a verdict.
+export function hasFirstParamIdentityBranch(code, fn, lang) {
+  const loc = locateBody(code, fn, lang);
+  if (!loc || !loc.firstParam) return false;
+  const inner = codeOnly(loc.originalInner, lang === 'python' ? 'python' : lang === 'kotlin' || lang === 'java' ? lang : 'typescript');
+  const p = loc.firstParam.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\breturn\\s+${p}\\s*(?:$|[;\\r\\n}])`, 'm').test(inner)
+    || new RegExp(`\\?:\\s*${p}\\b`).test(inner)
+    || new RegExp(`\\belse\\s+${p}\\s*(?:$|[;\\r\\n}])`, 'm').test(inner)
+    || new RegExp(`->\\s*${p}\\s*(?:$|[;\\r\\n}])`, 'm').test(inner)
+    || new RegExp(`\\)\\s*${p}\\s*(?:$|\\belse\\b|[;\\r\\n}])`, 'm').test(inner)
+    || new RegExp(`[?:]\\s*${p}\\s*(?:$|[,;)\\r\\n}])`, 'm').test(inner);
+}
+
+// Opposite-signed counterpart for the --deep two-sentinel probe: the extreme sentinel is direction-blind
+// on one-sided comparison logic (a threshold test can survive +HUGE yet go red at -HUGE, or vice versa),
+// so --deep runs a second mutant with the sign flipped. null when the sentinel has no direction (the
+// string sentinel) — Boolean/Char already fall through to the numeric default, where a compile failure is
+// the safety net exactly as in grossBreak.
+export function grossBreakOpposite(code, fn, lang) {
+  const loc = locateBody(code, fn, lang);
+  if (!loc) return null;
+  const v = gutValueFor(loc.returnType, lang);
+  if (v.startsWith('"')) return null;
+  return code.slice(0, loc.start) + loc.make('-' + v) + code.slice(loc.end);
+}
+
 // Depth probe (opt-in): replace the body with `return <firstParam>` — an identity stub. A value-pinned
 // test that the gross stub BREAKS but this stub does NOT only exercised a FIXED POINT of the function
 // (an input the transform leaves unchanged), not the transform itself. null when there is no usable first

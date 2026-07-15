@@ -7,7 +7,7 @@
 [INFO] 
 [INFO] --- resources:3.3.1:resources (default-resources) @ mfeas ---
 [WARNING] Using platform encoding (UTF-8 actually) to copy filtered resources, i.e. build is platform dependent!
-[INFO] skip non existing resourceDirectory /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/main/resources
+[INFO] skip non existing resourceDirectory /tmp/work/mfeas/src/main/resources
 [INFO] 
 [INFO] --- compiler:3.11.0:compile (default-compile) @ mfeas ---
 [INFO] Changes detected - recompiling the module! :source
@@ -16,7 +16,7 @@
 [INFO] 
 [INFO] --- resources:3.3.1:testResources (default-testResources) @ mfeas ---
 [WARNING] Using platform encoding (UTF-8 actually) to copy filtered resources, i.e. build is platform dependent!
-[INFO] skip non existing resourceDirectory /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/test/resources
+[INFO] skip non existing resourceDirectory /tmp/work/mfeas/src/test/resources
 [INFO] 
 [INFO] --- compiler:3.11.0:testCompile (default-testCompile) @ mfeas ---
 [INFO] Changes detected - recompiling the module! :dependency
@@ -60,7 +60,7 @@ org.opentest4j.AssertionFailedError: expected: <5> but was: <987654321>
 [INFO] ------------------------------------------------------------------------
 [ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project mfeas: There are test failures.
 [ERROR] 
-[ERROR] Please refer to /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/target/surefire-reports for the individual test results.
+[ERROR] Please refer to /tmp/work/mfeas/target/surefire-reports for the individual test results.
 [ERROR] Please refer to dump files (if any exist) [date].dump, [date]-jvmRun[N].dump and [date].dumpstream.
 [ERROR] -> [Help 1]
 [ERROR] 

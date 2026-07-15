@@ -522,7 +522,7 @@ test('t', () => {
   assert.deepEqual(jsInstanceSuts(body, testCode, absTest, srcFiles, importMap(testCode), d), []);
 });
 
-// adversarial 16 (Fable deep-review finding, confirmed false HOLLOW): guard (g) used to be
+// adversarial 16 (deep-review finding, confirmed false HOLLOW): guard (g) used to be
 // `jsDeclSiteCount(srcCode, method) === 1`, which only guarantees the single decl SITE is the unique gut
 // TARGET file-wide — NOT that it lies inside the resolved class's OWN body. Here `Service extends Base`
 // and `decrypt` is INHERITED from Base (a different file); the only same-named decl site in service.mjs
@@ -535,7 +535,7 @@ test('t', () => {
 // `prove()` run reported `hollow: [{ file: 'test/service.test.mjs', ..., survivors: ['decrypt'] }]`,
 // `caught: 0` — a false HOLLOW on a genuinely sound test. Post-fix: jsInstanceSuts refuses (the decl
 // site is inside LegacyCodec's span, not Service's — Service has no own-body `decrypt` at all), so the
-// block stays skipped/no-pin (never scored, never hollow).
+// block stays skipped/pin-unresolved — the pin is real, the refused link is the guard working (never scored, never hollow).
 const BASE_SRC = `export class Base {
   decrypt(s) { return s.split('').reverse().join(''); }
 }
@@ -581,8 +581,8 @@ test('PROVE adversarial 16 e2e: the inherited-method/sibling-collision block sta
     const full = prove(d, { runner: 'node' });
     assert.equal(full.hollow.length, 0, 'never a false HOLLOW on this sound test');
     assert.equal(full.caught, 0, 'no credit was minted, so nothing is scored as caught either');
-    assert.equal(full.skipped.length, 1, 'the block stays skipped/no-pin, exactly as unprobed as before jsInstanceSuts existed');
-    assert.equal(full.skipped[0].why, 'no-pin');
+    assert.equal(full.skipped.length, 1, 'the block stays skipped/pin-unresolved, exactly as unprobed as before jsInstanceSuts existed');
+    assert.equal(full.skipped[0].why, 'pin-unresolved');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -633,7 +633,7 @@ test('adversarial 16b: inner class nested inside a sibling method refuses (not t
   assert.deepEqual(jsInstanceSuts(SERVICE_TEST_BODY, SERVICE_TEST_CODE, absTest, srcFiles, importMap(SERVICE_TEST_CODE), d), []);
 });
 
-test('PROVE adversarial 16b e2e (object-literal nesting): the block stays skipped (no-pin), never HOLLOW', () => {
+test('PROVE adversarial 16b e2e (object-literal nesting): the block stays skipped (pin-unresolved), never HOLLOW', () => {
   const d = project({
     'package.json': '{"type":"module"}',
     'src/base.mjs': BASE_SRC,
@@ -644,12 +644,12 @@ test('PROVE adversarial 16b e2e (object-literal nesting): the block stays skippe
     const full = prove(d, { runner: 'node' });
     assert.equal(full.hollow.length, 0, 'never a false HOLLOW on this sound test');
     assert.equal(full.caught, 0, 'no credit was minted, so nothing is scored as caught either');
-    assert.equal(full.skipped.length, 1, 'the block stays skipped/no-pin');
-    assert.equal(full.skipped[0].why, 'no-pin');
+    assert.equal(full.skipped.length, 1, 'the block stays skipped/pin-unresolved');
+    assert.equal(full.skipped[0].why, 'pin-unresolved');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('PROVE adversarial 16b e2e (inner-class nesting): the block stays skipped (no-pin), never HOLLOW', () => {
+test('PROVE adversarial 16b e2e (inner-class nesting): the block stays skipped (pin-unresolved), never HOLLOW', () => {
   const d = project({
     'package.json': '{"type":"module"}',
     'src/base.mjs': BASE_SRC,
@@ -660,8 +660,8 @@ test('PROVE adversarial 16b e2e (inner-class nesting): the block stays skipped (
     const full = prove(d, { runner: 'node' });
     assert.equal(full.hollow.length, 0, 'never a false HOLLOW on this sound test');
     assert.equal(full.caught, 0, 'no credit was minted, so nothing is scored as caught either');
-    assert.equal(full.skipped.length, 1, 'the block stays skipped/no-pin');
-    assert.equal(full.skipped[0].why, 'no-pin');
+    assert.equal(full.skipped.length, 1, 'the block stays skipped/pin-unresolved');
+    assert.equal(full.skipped[0].why, 'pin-unresolved');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -730,7 +730,7 @@ test('PROVE positive control e2e (own-body class-field arrow): decrypt is CAUGHT
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-// ---- adversarial 16c/16d (Fable's final consolidated review, guard g3): TWO more false-HOLLOW variants
+// ---- adversarial 16c/16d (final consolidated review, guard g3): TWO more false-HOLLOW variants
 // of the same inheritance root. Pass-1's field-initializer signature (`decrypt = …`, jsSigRegex patterns
 // 3-5) anchors purely on the NAME with a `\b` boundary, blind to a `static`/`#` prefix immediately before
 // it. service.decrypt(x) dispatches to the INSTANCE method on the prototype chain — a same-named STATIC
@@ -766,7 +766,7 @@ test('adversarial 16c: static arrow field with the same name as the inherited in
   assert.deepEqual(jsInstanceSuts(SERVICE_TEST_BODY, SERVICE_TEST_CODE, absTest, srcFiles, importMap(SERVICE_TEST_CODE), d), []);
 });
 
-test('PROVE adversarial 16c e2e (static arrow field): the block stays skipped (no-pin), never HOLLOW', () => {
+test('PROVE adversarial 16c e2e (static arrow field): the block stays skipped (pin-unresolved), never HOLLOW', () => {
   const d = project({
     'package.json': '{"type":"module"}',
     'src/base.mjs': BASE_SRC,
@@ -777,8 +777,8 @@ test('PROVE adversarial 16c e2e (static arrow field): the block stays skipped (n
     const full = prove(d, { runner: 'node' });
     assert.equal(full.hollow.length, 0, 'never a false HOLLOW on this sound test');
     assert.equal(full.caught, 0, 'no credit was minted, so nothing is scored as caught either');
-    assert.equal(full.skipped.length, 1, 'the block stays skipped/no-pin');
-    assert.equal(full.skipped[0].why, 'no-pin');
+    assert.equal(full.skipped.length, 1, 'the block stays skipped/pin-unresolved');
+    assert.equal(full.skipped[0].why, 'pin-unresolved');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -789,7 +789,7 @@ test('adversarial 16d: private (#) arrow field with the same name as the inherit
   assert.deepEqual(jsInstanceSuts(SERVICE_TEST_BODY, SERVICE_TEST_CODE, absTest, srcFiles, importMap(SERVICE_TEST_CODE), d), []);
 });
 
-test('PROVE adversarial 16d e2e (private arrow field): the block stays skipped (no-pin), never HOLLOW', () => {
+test('PROVE adversarial 16d e2e (private arrow field): the block stays skipped (pin-unresolved), never HOLLOW', () => {
   const d = project({
     'package.json': '{"type":"module"}',
     'src/base.mjs': BASE_SRC,
@@ -800,8 +800,8 @@ test('PROVE adversarial 16d e2e (private arrow field): the block stays skipped (
     const full = prove(d, { runner: 'node' });
     assert.equal(full.hollow.length, 0, 'never a false HOLLOW on this sound test');
     assert.equal(full.caught, 0, 'no credit was minted, so nothing is scored as caught either');
-    assert.equal(full.skipped.length, 1, 'the block stays skipped/no-pin');
-    assert.equal(full.skipped[0].why, 'no-pin');
+    assert.equal(full.skipped.length, 1, 'the block stays skipped/pin-unresolved');
+    assert.equal(full.skipped[0].why, 'pin-unresolved');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

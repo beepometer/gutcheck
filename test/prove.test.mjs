@@ -1788,7 +1788,7 @@ test('PROVE node e2e: a bare-title collision across describes is resolved by des
     const r = prove(d, { runner: 'node' });
     if (NODE_MAJOR >= 22) {
       assert.equal(r.inconclusive.length, 0, 'no ambiguous-title inconclusive — qualification resolved it');
-      assert.equal(r.probes, 2, 'both blocks were actually probed, isolated from each other');
+      assert.equal(r.probes, 3, 'both blocks were actually probed, isolated from each other');
       assert.equal(r.caught, 1, 'the starter-tier block (crashes under the mutation) is caught');
       assert.ok(r.hollow.some((h) => h.name === 'same title'), 'the growth-tier self-comparison block is HOLLOW');
       // path/qualified-name leakage check: the report entries never carry a `path` or qualified-name field —
@@ -1867,7 +1867,7 @@ test('PROVE node e2e: an escaped-quote DESCRIBE title still qualifies and disamb
     const r = prove(d, { runner: 'node' });
     if (NODE_MAJOR >= 22) {
       assert.equal(r.inconclusive.length, 0, 'the escaped-quote describe title still qualifies and resolves the collision');
-      assert.equal(r.probes, 2, 'both blocks isolated and probed');
+      assert.equal(r.probes, 3, 'both blocks isolated and probed');
       assert.equal(r.caught, 1, 'the starter-tier block (crashes under the mutation) is caught');
       assert.ok(r.hollow.some((h) => h.name === 'same title'), 'the growth-tier self-comparison block is HOLLOW');
     } else {
@@ -1923,7 +1923,7 @@ describe('growth tier',function(){
   try {
     const r = prove(d, { runner: 'mocha' });
     assert.equal(r.inconclusive.length, 0, 'no ambiguous-title inconclusive — qualification resolved it');
-    assert.equal(r.probes, 2);
+    assert.equal(r.probes, 3);
     assert.equal(r.caught, 1, 'the starter-tier block (crashes under the mutation) is caught');
     assert.ok(r.hollow.some((h) => h.name === 'same title'), 'the growth-tier self-comparison block is HOLLOW');
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -1969,7 +1969,7 @@ describe('a b',function(){
   try {
     const r = prove(d, { runner: 'mocha' });
     assert.equal(r.inconclusive.length, 0, 'the prefix collision is resolved, not fail-closed');
-    assert.equal(r.probes, 2, 'both blocks probed in isolation from each other');
+    assert.equal(r.probes, 3, 'both blocks probed in isolation from each other');
     assert.equal(r.caught, 1, 'describe("b") block (crashes under the mutation) is caught');
     assert.ok(r.hollow.some((h) => h.name === 'c'), 'describe("a b") self-comparison block is HOLLOW');
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -1993,7 +1993,7 @@ describe('other tier',function(){
   try {
     const r = prove(d, { runner: 'mocha' });
     assert.equal(r.inconclusive.length, 0, 'the specials-bearing collision is resolved, not fail-closed');
-    assert.equal(r.probes, 2, 'both blocks probed in isolation from each other');
+    assert.equal(r.probes, 3, 'both blocks probed in isolation from each other');
     assert.equal(r.caught, 1, 'the tier (x) block (crashes under the mutation) is caught');
     assert.ok(r.hollow.some((h) => h.name === 'costs $5'), 'the other-tier self-comparison block is HOLLOW');
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -2121,7 +2121,7 @@ describe('growth tier', () => {
     assert.equal(detectRunner(d), 'vitest');
     const r = prove(d, { runner: 'vitest' });
     assert.equal(r.inconclusive.length, 0, 'no ambiguous-title inconclusive — qualification resolved it, recall recovered');
-    assert.equal(r.probes, 2, 'both blocks were actually probed, isolated from each other');
+    assert.equal(r.probes, 3, 'both blocks were actually probed, isolated from each other');
     assert.equal(r.caught, 1, 'the starter-tier block (crashes under the mutation) is caught');
     assert.equal(r.hollow.length, 1, 'the growth-tier self-comparison block is HOLLOW — the previously-masked true hollow');
     assert.equal(r.hollow[0].name, 'same title');
@@ -2201,7 +2201,7 @@ describe('growth tier', () => {
   try {
     const r = prove(d, { runner: 'jest' });
     assert.equal(r.inconclusive.length, 0, 'no ambiguous-title inconclusive — qualification resolved it');
-    assert.equal(r.probes, 2);
+    assert.equal(r.probes, 3);
     assert.equal(r.caught, 1, 'the starter-tier block (crashes under the mutation) is caught');
     assert.ok(r.hollow.some((h) => h.name === 'same title'), 'the growth-tier self-comparison block is HOLLOW');
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -2817,11 +2817,11 @@ test('fmt sound', () => { assert.strictEqual(fmt(13.5), '$13.50'); });
     assert.deepEqual(r, {
       runner: 'node', scored: 3, caught: 2,
       hollow: [{ file: 'test/t.test.mjs', line: 3, name: 'shadow', survivors: ['total'], survivorPairs: [{ fn: 'total', sutRel: 'src/lib.mjs' }] }],
-      weak: [], inconclusive: [],
+      weak: [], oneSided: [], oneSidedBlocks: 0, inconclusive: [],
       skipped: [{ file: 'test/t.test.mjs', line: 4, name: 'weak', why: 'no-pin' }],
-      outOfScope: 0, probes: 3, capped: 0, pct: 67,
+      outOfScope: 0, probes: 4, capped: 0, envAborted: 0, pct: 67,
       changedFileCount: undefined, changes: null, changeSummary: null,
-    }, 'the WHOLE result must match the pre-change snapshot — grossSurvivors absent (hollow-only survivor evidence is not novel)');
+    }, 'the WHOLE result must match the snapshot (probes counts the hollow-confirmation mutant; the self-comparison survives both sentinels) — grossSurvivors absent (hollow-only survivor evidence is not novel)');
     assert.ok(!('grossSurvivors' in r), 'the key must be omitted entirely, not present-as-[] or present-as-undefined');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
@@ -2863,5 +2863,126 @@ test('PROVE: skip-dir regex is literal — a source dir named "agit" is not eate
   const r = prove(d, { runner: 'node' });
   assert.equal(r.scored, 1, 'scored with an agit/ source dir');
   assert.equal(r.caught, 1, 'caught with an agit/ source dir');
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---- formatReport (diff mode): a hollow in the probed scope BEYOND the changed-function rows must
+// render on the DEFAULT report — the exit code counts r.hollow across the whole probed scope (a touched
+// test file is probed whole-file), so a report whose headline says "0 hollow" while the process exits 1
+// is a silent false negative on the tool's core promise (public issue #1; the --format=markdown surface
+// already reconciles via its extraHollow section — this pins the same invariant on the default surface).
+// Oracle: the r object is hand-built to the shape prove() returns (changeSummary counts changed fns only;
+// r.hollow carries the whole-scope execution finding) — never captured from formatReport's own output.
+test('formatReport diff mode: whole-scope hollow beyond the changed functions is rendered, with a headline count', () => {
+  const r = {
+    runner: 'node', scored: 2, caught: 1, probes: 2, capped: 0, pct: 50, changedFileCount: 2,
+    weak: [], inconclusive: [], skipped: [], outOfScope: 0,
+    hollow: [{ file: 'test/all.test.mjs', line: 10, name: 'scale self-check', survivors: ['scale'], survivorPairs: [{ fn: 'scale', sutRel: 'src/b.mjs' }] }],
+    changes: [{ file: 'src/a.mjs', fn: 'add', line: 1, status: 'proven', granularity: 'hunk', evidence: { blocks: [{ file: 'test/all.test.mjs', line: 3, name: 'add pins' }], sameDiffOracle: false } }],
+    changeSummary: { files: 2, fns: 1, proven: 1, hollow: 0, unverifiable: 0, untested: 0, notProbed: 0, sameDiffProven: 0 },
+  };
+  const out = formatReport(r);
+  assert.ok(out.includes('test/all.test.mjs:10'), 'the hollow block file:line must appear on the default surface');
+  assert.ok(out.includes("'scale self-check'"), 'the hollow block name must appear');
+  assert.ok(out.includes('still passes when scale() is gutted'), 'the receipt phrasing states what happened');
+  assert.match(out, /1 HOLLOW beyond the diff/, 'the headline itself must carry the count — it is the line the contradiction lived on');
+});
+
+test('formatReport diff mode: a hollow already carried by a changed-function row is NOT double-rendered', () => {
+  const blk = { file: 't/x.test.mjs', line: 7, name: 'circ' };
+  const r = {
+    runner: 'node', scored: 1, caught: 0, probes: 1, capped: 0, pct: 0, changedFileCount: 1,
+    weak: [], inconclusive: [], skipped: [], outOfScope: 0,
+    hollow: [{ ...blk, survivors: ['f'], survivorPairs: [{ fn: 'f', sutRel: 'src/f.mjs' }] }],
+    changes: [{ file: 'src/f.mjs', fn: 'f', line: 1, status: 'hollow', granularity: 'file', evidence: { blocks: [blk] } }],
+    changeSummary: { files: 1, fns: 1, proven: 0, hollow: 1, unverifiable: 0, untested: 0, notProbed: 0, sameDiffProven: 0 },
+  };
+  const out = formatReport(r);
+  assert.ok(!/beyond the diff/.test(out), 'covered by the changed-fn hollow row — no extra section, no double count');
+  assert.equal(out.split('t/x.test.mjs:7').length - 1, 1, 'the block file:line renders exactly once');
+});
+
+test('formatReport diff mode: empty whole-scope hollow renders byte-identically (no new section, no headline fragment)', () => {
+  const r = {
+    runner: 'node', scored: 1, caught: 1, probes: 1, capped: 0, pct: 100, changedFileCount: 1,
+    weak: [], inconclusive: [], skipped: [], outOfScope: 0, hollow: [],
+    changes: [{ file: 'src/a.mjs', fn: 'add', line: 1, status: 'proven', granularity: 'hunk', evidence: { blocks: [{ file: 't/t.test.mjs', line: 3, name: 'adds' }], sameDiffOracle: false } }],
+    changeSummary: { files: 1, fns: 1, proven: 1, hollow: 0, unverifiable: 0, untested: 0, notProbed: 0, sameDiffProven: 0 },
+  };
+  assert.ok(!/beyond the diff/i.test(formatReport(r)), 'zero-state: no fragment, no section');
+});
+
+// ---- pin-unresolved (public issue #3, defect A): a test that pins literals through a DESTRUCTURING
+// declaration (`const [a, b] = f(x)`) is invisible to the var-hop (its LHS is not a single identifier) —
+// the block is rightly skipped, but 'no-pin' rendered as "only checks a mock / no value pinned" asserts
+// something false about the test and sends its author to "fix" a sound oracle. The engine must state the
+// two facts it actually established, separately: a pin exists ('pin-unresolved'), vs no pin found
+// ('no-pin'). Oracle hand-derived from the fixture source: lo/hi ARE pinned to 2/3 by hand.
+test('prove: a destructured pin skips as pin-unresolved — never the false "no value pinned" claim', () => {
+  const d = project({
+    'package.json': '{"type":"module"}',
+    'src/box.mjs': 'export function box(n) { return [n + 1, n + 2]; }\n',
+    'test/box.test.mjs':
+      "import { test } from 'node:test'; import assert from 'node:assert';\n" +
+      "import { box } from '../src/box.mjs';\n" +
+      "test('box components', () => { const [lo, hi] = box(1); assert.strictEqual(lo, 2); assert.strictEqual(hi, 3); });\n",
+  });
+  const r = prove(d, { runner: 'node' });
+  assert.equal(r.scored, 0, 'the block is not probeable — that part is unchanged');
+  assert.equal(r.skipped.length, 1);
+  assert.equal(r.skipped[0].why, 'pin-unresolved', 'a pin exists and the scanner could not link it — say that, not no-pin');
+  rmSync(d, { recursive: true, force: true });
+});
+
+test('prove: a weak-only block (no literal pin anywhere) still skips as no-pin (unchanged)', () => {
+  const d = project({
+    'package.json': '{"type":"module"}',
+    'src/pos.mjs': 'export function isPositive(n) { return n > 0; }\n',
+    'test/pos.test.mjs':
+      "import { test } from 'node:test'; import assert from 'node:assert';\n" +
+      "import { isPositive } from '../src/pos.mjs';\n" +
+      "test('positive', () => { assert.ok(isPositive(5)); });\n",
+  });
+  const r = prove(d, { runner: 'node' });
+  assert.equal(r.skipped.length, 1);
+  assert.equal(r.skipped[0].why, 'no-pin', 'genuinely pin-free stays no-pin — the message is true there');
+  rmSync(d, { recursive: true, force: true });
+});
+
+// The rendered message for the new reason must state only what the probe established — and the old
+// mock/no-pin phrasing must never leak onto a pin-unresolved row.
+test('formatReport diff mode: pin-unresolved renders its honest message, never the mock/no-pin claim', () => {
+  const r = {
+    runner: 'gradle', scored: 0, caught: 0, probes: 0, capped: 0, pct: null, changedFileCount: 1,
+    weak: [], inconclusive: [], skipped: [{ file: 't/g.test.kt', line: 2, name: 'destructured', why: 'pin-unresolved' }], outOfScope: 0, hollow: [],
+    changes: [{ file: 'src/geo.kt', fn: 'boundingBoxM', line: 1, status: 'unverifiable', granularity: 'file', evidence: { reason: 'pin-unresolved', reasons: { 'pin-unresolved': 1 }, blocks: [{ file: 't/g.test.kt', line: 2, name: 'destructured' }] } }],
+    changeSummary: { files: 1, fns: 1, proven: 0, hollow: 0, unverifiable: 1, untested: 0, notProbed: 0, sameDiffProven: 0 },
+  };
+  const out = formatReport(r);
+  assert.ok(out.includes("pins a value the probe can't tie to a called function"), 'states exactly the two established facts');
+  assert.ok(!/only checks a mock/.test(out), 'the false claim must be gone from this row');
+});
+
+// ---- time budget must bound the ANALYSIS phase, not just probing. The only budget check used to sit
+// AFTER the per-block eligibility work (whose JVM resolvers scan source files per candidate), so an
+// unscoped run on a large repo ground CPU for 20+ minutes with zero probes, zero output, and the budget
+// never consulted — the skip paths `continue` before reaching the check. Once the budget is exhausted,
+// every remaining block must be recorded probe-cap WITHOUT running eligibility. Oracle hand-derived:
+// with a 1ms budget (guaranteed exhausted before block 1 — work-copy setup alone exceeds it), BOTH
+// blocks cap; under the old code the weak block still went through classification (skipped/no-pin).
+test('prove: an exhausted time budget caps remaining blocks before analysis — never a silent grind', () => {
+  const d = project({
+    'package.json': '{"type":"module"}',
+    'src/m.mjs': 'export function isPositive(n) { return n > 0; }\nexport function add(a, b) { return a + b; }\n',
+    'test/m.test.mjs':
+      "import { test } from 'node:test'; import assert from 'node:assert';\n" +
+      "import { isPositive, add } from '../src/m.mjs';\n" +
+      "test('weak', () => { assert.ok(isPositive(5)); });\n" +
+      "test('sound', () => { assert.strictEqual(add(2, 3), 5); });\n",
+  });
+  const r = prove(d, { runner: 'node', timeBudgetMs: 1 });
+  assert.equal(r.probes, 0, 'no probe ever started');
+  assert.equal(r.capped, 2, 'both blocks report probe-cap — analysis itself is bounded');
+  assert.equal(r.skipped.length, 0, 'no block reached eligibility classification after exhaustion');
   rmSync(d, { recursive: true, force: true });
 });

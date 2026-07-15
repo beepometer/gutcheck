@@ -17,7 +17,9 @@ real finding — then repair each at its source, never by making the number look
 ## 1 — Prove the tests catch their code (the mutation score)
 
 `prove` guts each tested function with a guaranteed-wrong return and runs only that test. A test that still
-passes is **hollow** — it does not check the function. This fires where a static read is silent (an expected
+passes is re-gutted with an opposite-signed wrong return before any accusation: green under **both** is
+**hollow** — it cannot detect the function breaking; red under exactly one is **one-sided** (binds one
+direction of error; reported, never a blocker). This fires where a static read is silent (an expected
 value that re-runs the code under test, an assertion dialect a parser can't see), and the verdict is
 execution-proven, not a guess.
 

@@ -17,11 +17,12 @@ import { join, relative, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync, execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { grossBreak, passthroughBreak, jsDeclSites, jvmDeclSites, locateKotlinSite, pyDeclSiteCount } from './probe.mjs';
+import { grossBreak, grossBreakOpposite, hasFirstParamIdentityBranch, passthroughBreak, jsDeclSites, jvmDeclSites, locateKotlinSite, pyDeclSiteCount } from './probe.mjs';
 import { sutFnsIn } from './confirm.mjs';
 import { codeOnly } from '../checker/lexer.mjs';
 import { classifyChanges, hunkNewRanges, changedDecls } from './changes.mjs';
 import { selfEchoAssertion, titleSutCandidates } from './wrongLayerShadow.mjs';
+import { acquireRepoLock } from './lock.mjs';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.claude', 'dist', 'build', '.gradle', 'target', 'vendor', '.venv', 'venv', '__pycache__', 'out', 'coverage', '.next', '.svelte-kit', '.vite']);
 const DEFAULT_TIMEOUT_MS = Number(process.env.GUTCHECK_PROBE_TIMEOUT_MS) || 60000;
@@ -285,7 +286,10 @@ export function gradleTaskInfo(dir, testFileRel) {
   // same JUnit XML the correctness spine reads). Checked BEFORE android detection — a KMP module with an
   // android target still runs its JVM-target tests through jvmTest, never testDebugUnitTest (wild
   // specimen: heypandax/cc-pocket :protocol, where `test` 0-matched and burned a baseline per block).
-  if (rel.includes('/src/jvmTest/') || (rel.includes('/src/commonTest/') && kmpJvmTargetExists(dir, rel))) {
+  // Anchored like jvmSourceSetGate's regex: a ROOT-module KMP rel has no leading slash
+  // (src/jvmTest/..., wild specimen sunny-chung/giant-log-viewer), so a bare '/src/jvmTest/'
+  // substring match misses it and falls through to the nonexistent `test` task.
+  if (/(?:^|\/)src\/jvmTest\//.test(rel) || (/(?:^|\/)src\/commonTest\//.test(rel) && kmpJvmTargetExists(dir, rel))) {
     const prefix = moduleDir ? ':' + moduleDir.split('/').join(':') + ':' : '';
     return { unitTask: 'jvmTest', taskPath: prefix + 'jvmTest', cleanPath: prefix + 'cleanJvmTest', resultsDir: join(moduleDir, 'build', 'test-results', 'jvmTest') };
   }
@@ -1063,12 +1067,21 @@ export function kotlinLeadingCall(expr) {
   const m = /^\s*([a-z_]\w*)\s*(?:<[^>]*>\s*)?[({]/.exec(expr);
   return m ? m[1] : null;
 }
+// Back-compat single-value form — every reach/eligibility consumer that only needs the linked names.
 export function eligibleFns(body, candidateFns, imports = new Map(), lang) {
+  return eligibleFnsDetail(body, candidateFns, imports, lang).eligible;
+}
+// Detail form: `eligible` (candidate fns a pinned fragment or a var-hop actually links) plus `hadPin` —
+// whether ANY pinned fragment existed at all. The two are separate facts: a pin the scanner cannot link
+// (a destructuring LHS, an unmodeled hop shape) leaves eligible empty while hadPin is true, and the skip
+// reason must say THAT ('pin-unresolved') rather than claim "no value pinned" about a test that pins
+// (public issue #3 — the false claim sends users to "fix" sound tests).
+export function eligibleFnsDetail(body, candidateFns, imports = new Map(), lang) {
   const codeLang = (lang === 'kotlin' || lang === 'java') ? lang : 'typescript';
   const masked = codeOnly(body, codeLang); // mask once; reused for both scans below (pinnedFragments
   // re-masks its input too — codeOnly is idempotent on already-masked text — so each stays independently safe).
   const frags = pinnedFragments(masked, imports, lang);
-  if (!frags.length) return [];
+  if (!frags.length) return { eligible: [], hadPin: false };
   const fragText = frags.join(' ; ');
   const calls = (txt, fn) => new RegExp('\\b' + reEsc(fn) + '\\s*\\(').test(txt);
   const eligible = new Set(candidateFns.filter((fn) => calls(fragText, fn)));
@@ -1120,7 +1133,7 @@ export function eligibleFns(body, candidateFns, imports = new Map(), lang) {
       if (lead && candidateFns.includes(lead)) eligible.add(lead);
     }
   }
-  return [...eligible];
+  return { eligible: [...eligible], hadPin: true };
 }
 
 // ---- SUT resolution: the non-test source file that the TEST FILE actually imports a fn from ----
@@ -2234,6 +2247,13 @@ export function prove(dir, opts = {}) {
   const maxProbes = opts.maxProbes || Infinity; // R6: bound latency on a large diff; default unlimited
   const timeBudgetMs = opts.timeBudgetMs || 0; // wall-clock cap for the whole probe pass; 0 = unlimited
   const probeStart = Date.now();
+  // The budget bounds ANALYSIS too, not just probing: the per-block eligibility work (JVM SUT resolvers
+  // scan source files per candidate) is the expensive phase on a large unscoped repo, and the pre-probe
+  // cap check sits after the skip routing, which `continue`s first — an all-skip prefix used to grind
+  // unbounded (20+ min, zero probes, zero output) with the budget never consulted. Checked at the top of
+  // the block loop and before the per-file shared-setup scan; a block past the budget records probe-cap
+  // without analysis — "not probed" must mean not analyzed either, or the budget is a lie.
+  const budgetExhausted = () => Boolean(timeBudgetMs && Date.now() - probeStart >= timeBudgetMs);
 
   // diff scope: a Set of absolute changed paths (from opts.changed, or resolved from opts.since via git)
   let changed = opts.changed || null;
@@ -2254,8 +2274,23 @@ export function prove(dir, opts = {}) {
     testFiles = [...testFiles.filter((f) => inDiff.has(f)), ...testFiles.filter((f) => !inDiff.has(f))];
   }
 
+  // Repo-scoped probe lock (mutation/lock.mjs): a second concurrent probe on this repo would drive a
+  // second test runner into the same build state — two Gradles collide and mint phantom failures (the
+  // observed shape: the agent hook firing mid-CLI-sweep). Acquired after scope resolution (a bad --since
+  // still errors lock-free), released in the work-dir finally below. Held by a live process → a stated
+  // refusal via scopeError (CLI exit 2; the gate parses it, yields, and never memoizes it).
+  const repoLock = acquireRepoLock(dir);
+  if (!repoLock.release) {
+    const who = repoLock.held && repoLock.held.pid ? ` (pid ${repoLock.held.pid})` : '';
+    return { runner, scored: 0, caught: 0, hollow: [], inconclusive: [], skipped: [], outOfScope: 0, probes: 0, pct: null, scopeError: `another gutcheck probe is already running on this repo${who} — likely the agent hook or another terminal; rerun when it finishes (a stale lock clears itself)`, changes: null, changeSummary: null };
+  }
+
   const work = mkdtempSync(join(tmpdir(), 'gutcheck-prove-'));
-  let caught = 0; const hollow = []; const inconclusive = []; const skipped = []; const weak = []; let probes = 0; let outOfScope = 0; let capped = 0;
+  // Counter units differ by design: `probes` counts mutant runs — one per eligible FUNCTION gutted —
+  // while caught/hollow/scored count TEST-BLOCK verdicts. A block binding K functions yields K probes
+  // but one verdict, so probes ≥ scored always; the excess is multi-function blocks (plus any
+  // survivors inside a caught block, surfaced separately as grossSurvivors). pct reads caught/scored only.
+  let caught = 0; const hollow = []; const inconclusive = []; const skipped = []; const weak = []; const oneSided = []; let oneSidedBlocks = 0; let probes = 0; let outOfScope = 0; let capped = 0; let envAborted = 0;
   // true denominators for the --deep identity-stub advisory — per-fn, not per-test: stubbed = passthrough
   // probes attempted for fn, passed = the stub survived (also lands in `weak`). An audit found most
   // survivors legitimate (no-op branches / accidental fixed points), so this reports ratios, never a
@@ -2294,6 +2329,9 @@ export function prove(dir, opts = {}) {
     // 'junction' needs no privileges on Windows (plain dir symlinks do); non-win32 keeps 'dir'.
     if (existsSync(nm)) { try { symlinkSync(nm, join(work, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir'); } catch {} }
 
+    // Fail-fast on a broken env: the first ENV_ABORT_THRESHOLD blocks that reach a baseline all failing it with none passing means a broken build/wrong runner is failing every test — stop probing the guaranteed-inconclusive rest.
+    const ENV_ABORT_THRESHOLD = 10;
+    let baselineOk = 0, baselineBad = 0;
     for (const tf of testFiles) {
       const rel = toPosix(relative(dir, tf)); const code = readFileSync(tf, 'utf8'); const L = lang(tf);
       const absTest = resolve(dir, rel);
@@ -2342,7 +2380,7 @@ export function prove(dir, opts = {}) {
       }
       // wrongLayerShadow whole-file shared-setup suppression (design doc's case (c)) — computed ONCE per
       // test file, JVM only (see jvmFileHasSharedSetupContact's header for why JS/py don't get this).
-      const jvmSharedSetupContact = jvmLang ? jvmFileHasSharedSetupContact(code, absTest, srcFiles, dir, jvmLang) : false;
+      const jvmSharedSetupContact = (jvmLang && !budgetExhausted()) ? jvmFileHasSharedSetupContact(code, absTest, srcFiles, dir, jvmLang) : false;
       const blocks = pyAst ? pyAst.blocks : parseBlocks(code, L);
       const ambiguous = ambiguousNames(blocks.map((b) => b.name), runner);
       // Stage 2 (only when stage 1 found anything — residualAmbiguous is a no-op-safe pure fn either way,
@@ -2352,6 +2390,15 @@ export function prove(dir, opts = {}) {
         // Masked once per block (JS: strip strings/comments so a code sample in a string can't false-
         // match a fn reference later; pyAst blocks are already ast-derived, so b.body is used as-is).
         const bodyMasked = pyAst ? b.body : codeOnly(b.body, 'typescript');
+        // Budget check BEFORE the analysis below (see budgetExhausted's comment): once exhausted, the
+        // block records probe-cap immediately — same accounting as the pre-probe cap further down, minus
+        // the shadow signals deliberately never computed for an unanalyzed block. maxProbes stays at the
+        // pre-probe site only: counting probes costs nothing, and its capped blocks keep full analysis.
+        if (budgetExhausted()) {
+          capped++;
+          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, verdict: 'skipped', why: 'probe-cap' });
+          continue;
+        }
         // wrongLayerShadow signals (Task: wrongLayerShadow) — computed for EVERY block regardless of
         // verdict (a shadow test is typically 'skipped'/no-pin, since it has no eligible SUT to gut: the
         // whole point is that nothing here resolves), pure and runner-independent (never invokes runOne,
@@ -2385,9 +2432,12 @@ export function prove(dir, opts = {}) {
           }
         }
         const shadowSignals = { noContact, selfEcho, shadowTargets };
-        const pinnedFns = pyAst
-          ? [...new Set(b.pins)]
-          : eligibleFns(b.body, sutFnsIn(b.body, jvmLang), imports, jvmLang);
+        // pyAst pins are already fn-linked by py_blocks.py, so hadPin collapses to "any pin" there —
+        // the pin-unresolved split below is only ever reachable on the JS/TS/JVM textual-scan path.
+        const pinDetail = pyAst
+          ? { eligible: [...new Set(b.pins)], hadPin: b.pins.length > 0 }
+          : eligibleFnsDetail(b.body, sutFnsIn(b.body, jvmLang), imports, jvmLang);
+        const pinnedFns = pinDetail.eligible;
         const eligible = pinnedFns
           .map((fn) => ({ fn, sutRel: pyAst ? resolvePySut(fn, pyAst.imports, absTest, srcFiles, dir) : jvmLang ? resolveJvmSut(fn, code, absTest, srcFiles, dir, jvmLang) : resolveSut(fn, absTest, imports) }))
           .filter((x) => x.sutRel);
@@ -2452,7 +2502,10 @@ export function prove(dir, opts = {}) {
         // takes priority over the pin/eligibility reasons below — no runner selection can ever target a
         // runtime-computed title, so the block is unprobeable regardless of whether it also has an
         // eligible SUT. Same scope-vs-skip routing as the pre-existing reasons, just a new `why`.
-        const why0 = b.dynamicTitle ? 'dynamic-title' : ((pinnedFns.length || eligible.length) ? 'sut-unresolved' : 'no-pin');
+        // 'no-pin' vs 'pin-unresolved': both skip, but they state different established facts — no pinned
+        // fragment existed at all, vs a pin exists that no hop shape could link to a called function
+        // (destructuring LHS, etc.). The rendered messages must each claim only what the scan proved.
+        const why0 = b.dynamicTitle ? 'dynamic-title' : (pinnedFns.length || eligible.length) ? 'sut-unresolved' : pinDetail.hadPin ? 'pin-unresolved' : 'no-pin';
         if (changed && !(changed.has(absTestKey) || eligible.some((e) => changed.has(canonKey(resolve(dir, e.sutRel)))))) {
           // Record the block BEFORE dropping it out of scope: a changed fn whose only tests are weak or
           // unresolved lives in blocks this gate never probes — with no record, classifyChanges would
@@ -2475,6 +2528,20 @@ export function prove(dir, opts = {}) {
           // baseline/mutant pair already in flight always finishes atomically.
           capped++;
           blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why: 'probe-cap' });
+          continue;
+        }
+        // Environment-abort fail-fast (see ENV_ABORT_THRESHOLD): once the first N blocks to reach a baseline
+        // have all failed it and NONE has passed, every remaining probeable block would fail identically —
+        // stop and record each as skipped 'env-abort', exactly mirroring the probe-cap record above (real
+        // reference evidence kept alive, so a fn read only here classifies 'unverifiable', never 'untested'),
+        // then finish through the normal reporting path. A baseline that passes among the first N probeable
+        // blocks (baselineOk > 0 before the threshold is hit) disables this permanently; a pass reachable
+        // only AFTER N failures is itself aborted here — ordering-dependent by design, but fail-closed: an
+        // aborted pass reads 'unverifiable', never a false verdict. Nothing already recorded changes; no
+        // verdict is ever minted from an aborted block.
+        if (baselineOk === 0 && baselineBad >= ENV_ABORT_THRESHOLD) {
+          envAborted++;
+          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why: 'env-abort' });
           continue;
         }
         // Fail-closed on ambiguous selection, but ONLY for a block that would otherwise be probed — after
@@ -2502,12 +2569,17 @@ export function prove(dir, opts = {}) {
           // RAN and FAILED is accusable ('baseline Xp/Yf' — the HEAD-rot signal). A 0-failure non-run
           // (skip, zero-match selection, timeout kill, unparsable summary) is 'did-not-run' — fail-closed
           // inconclusive, never a block: the agent cannot fix a failure that does not exist.
+          // baselineBad counts BOTH here (ran-and-failed AND did-not-run) — the same widened set the
+          // wipeout hint reads — so the env-abort threshold mirrors that check's semantics exactly.
+          baselineBad++;
           const why = `${base.failed > 0 ? 'baseline' : 'did-not-run'} ${base.passed}p/${base.failed}f`;
           inconclusive.push({ file: rel, line: b.line, name: b.name, why, detail: (base.out || '').slice(-400) });
           blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
           continue;
         }
-        let anyBroke = false; const survivors = []; let anyGutted = false; const brokeFns = []; let sawCompileFail = false;
+        baselineOk++; // a green baseline exists — the env is not wiped out, so env-abort never fires from here on
+        const survivors = []; let anyGutted = false; const brokeFns = []; let sawCompileFail = false;
+        const survivorFns = []; // {fn, abs, orig, lang} mirror of `survivors` — the --deep opposite-sentinel pass re-guts them
         for (const { fn, sutRel } of eligible) {
           const abs = join(work, sutRel); let orig; try { orig = readFileSync(abs, 'utf8'); } catch { continue; }
           const lang = sutRel.endsWith('.py') ? 'python' : sutRel.endsWith('.kt') ? 'kotlin' : sutRel.endsWith('.java') ? 'java' : 'typescript';
@@ -2525,18 +2597,62 @@ export function prove(dir, opts = {}) {
             writeFileSync(abs, orig);
             if (r.compiled === false) { sawCompileFail = true; continue; }
             anyGutted = true; probes++;
-            if (r.failed > 0) { anyBroke = true; brokeFns.push({ fn, abs, orig, lang }); }
-            else if (r.passed > 0) survivors.push(fn);
+            if (r.failed > 0) brokeFns.push({ fn, abs, orig, lang });
+            else if (r.passed > 0) { survivors.push(fn); survivorFns.push({ fn, abs, orig, lang }); }
             continue;
           }
           anyGutted = true; probes++;
           writeFileSync(abs, broken);
           const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
           writeFileSync(abs, orig);
-          if (r.failed > 0) { anyBroke = true; brokeFns.push({ fn, abs, orig, lang }); }
-          else if (r.passed > 0) survivors.push(fn);
+          if (r.failed > 0) brokeFns.push({ fn, abs, orig, lang });
+          else if (r.passed > 0) { survivors.push(fn); survivorFns.push({ fn, abs, orig, lang }); }
         }
-        if (anyBroke) {
+        // Two-sentinel pass — confirm-before-accuse: every SURVIVOR (candidate hollow) is re-gutted with
+        // the opposite-signed sentinel BEFORE verdicting, on every run — a hollow accusation is minted
+        // only when the test stays green in BOTH directions, so it can never be a sentinel-sign accident
+        // (field-observed: two mirror-image threshold tests once drew HOLLOW and PROVEN purely by sign,
+        // the hollow copy contradicting its own receipt). Survivors are rare, so the default cost is
+        // near zero — the extra run is paid exactly when an accusation is at stake, like the R5 recheck.
+        // --deep extends the same pass to the RED side (brokeFns), demoting one-direction-only proofs to
+        // one-sided. oppRed maps fn → the opposite mutant's result; ABSENT = no evidence (no numeric
+        // opposite exists, or it didn't compile, or the run was a 0p/0f non-run) — and no evidence means
+        // no reclassification: the fn keeps its single-sentinel meaning, fail-closed as everywhere else.
+        // R5 flake guard FIRST when an accusation is at stake (no fn broke, some survived): hollow AND
+        // one-sided both rest on the survivor-pass being stable, and an unstable test must stay
+        // inconclusive — never allowed to fake opposite-run evidence (CI caught exactly that bypass when
+        // this guard briefly ran after the opposite mutants). Running it first also skips their cost on
+        // a flaky block.
+        let flakyBlock = false; let flakeChecked = false;
+        if (!brokeFns.length && survivorFns.length) {
+          flakeChecked = true;
+          const recheck = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
+          flakyBlock = !(recheck.passed >= 1 && recheck.failed === 0);
+        }
+        const oppRed = new Map();
+        if (!flakyBlock) for (const { fn, abs, orig, lang } of (opts.deep ? [...brokeFns, ...survivorFns] : (brokeFns.length ? [] : survivorFns))) {
+          const opp = grossBreakOpposite(orig, fn, lang);
+          if (opp === null || opp === orig) continue;
+          probes++;
+          writeFileSync(abs, opp);
+          const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
+          writeFileSync(abs, orig);
+          if ((runner === 'gradle' || runner === 'maven') && r.compiled === false) continue;
+          if (r.failed > 0) oppRed.set(fn, true);
+          else if (r.passed > 0) oppRed.set(fn, false);
+        }
+        // Fn tiers: bound (red under both, or red with no opposite evidence), one-sided (red under
+        // exactly one sentinel), blind (green under both, or green with no opposite evidence). On a
+        // plain run only survivors carry opposite evidence, so bound = brokeFns exactly.
+        const boundFns = brokeFns.filter(({ fn }) => oppRed.get(fn) !== false);
+        const oneSidedFns = [
+          ...brokeFns.filter(({ fn }) => oppRed.get(fn) === false).map((x) => ({ ...x, posRed: true })),
+          ...survivorFns.filter(({ fn }) => oppRed.get(fn) === true).map((x) => ({ ...x, posRed: false })),
+        ];
+        const blindFns = survivorFns.filter(({ fn }) => oppRed.get(fn) !== true);
+        for (const { fn, posRed } of oneSidedFns) oneSided.push({ file: rel, line: b.line, name: b.name, fn, posRed });
+        const oneSidedPairs = oneSidedFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) }));
+        if (boundFns.length) {
           caught++;
           // Caught-branch blockRecords now also carries `survivors` (the already-computed local array): a
           // sibling fn broke this block, but any OTHER eligible fn's own separate mutant run may have
@@ -2552,18 +2668,25 @@ export function prove(dir, opts = {}) {
           // later fold into a proven row's evidence (every binding block's test file changed in this diff
           // → the oracle is same-diff, worth stating as fact, not a verdict). false on a full-scan run
           // (changed is null) — there is no "this diff" to be same to.
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'caught', caughtFns: brokeFns.map((x) => x.fn), survivors, caughtPairs: brokeFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) })), survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })), testChanged: changed ? changed.has(absTestKey) : false });
+          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'caught', caughtFns: boundFns.map((x) => x.fn), survivors, caughtPairs: boundFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) })), survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}), testChanged: changed ? changed.has(absTestKey) : false });
           tallyBlock(brokeFns.map((x) => x.fn), survivors);
         }
-        else if (survivors.length) {
-          // R5 flake guard: a HOLLOW verdict rests on the unmutated baseline being green AND the gutted
-          // mutant still passing. If the test is flaky (unstable green), re-running the now-restored
-          // unmutated test may not be green — then the survivor-pass proves nothing and we must not call
-          // it hollow. (The SUT was restored after each mutant run, so this runs the original code.)
-          const recheck = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
-          if (recheck.passed >= 1 && recheck.failed === 0) {
-            hollow.push({ file: rel, line: b.line, name: b.name, survivors, survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })) });
-            blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'hollow', survivors, survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })) });
+        else if (flakyBlock) {
+          // R5 flake guard verdict: the survivor-pass proves nothing on an unstable test — never a
+          // hollow, never a one-sided; the opposite mutants were skipped above for the same reason.
+          const why = 'flaky baseline (unstable green) — not a reliable HOLLOW';
+          inconclusive.push({ file: rel, line: b.line, name: b.name, why });
+          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
+        }
+        else if (blindFns.length) {
+          // Stability was already verified by the pre-opposite R5 check for accusation-shaped blocks.
+          // The one path that arrives here unchecked is deep-only — brokeFns existed but every one
+          // demoted to one-sided — so run the same guard now, before the accusation.
+          const recheck = flakeChecked ? null : runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
+          if (recheck === null || (recheck.passed >= 1 && recheck.failed === 0)) {
+            const blindNames = blindFns.map((x) => x.fn);
+            hollow.push({ file: rel, line: b.line, name: b.name, survivors: blindNames, survivorPairs: blindFns.map(({ fn }) => ({ fn, sutRel: sutOf.get(fn) })) });
+            blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'hollow', survivors: blindNames, survivorPairs: blindFns.map(({ fn }) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}) });
             // Deliberately NOT tallied into survivorTally: a hollow block's survivors are already reported
             // via r.hollow at higher severity — grossSurvivors is the NOVEL observation class only
             // (survivals inside caught blocks, reported nowhere else); tallying here would double-count.
@@ -2572,6 +2695,13 @@ export function prove(dir, opts = {}) {
             inconclusive.push({ file: rel, line: b.line, name: b.name, why });
             blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
           }
+        }
+        else if (oneSidedFns.length) {
+          // Deep-only tier: every gutted fn went red under exactly one sentinel — the test binds one
+          // direction of error. A verdict (counts in scored), never a blocker: only hollow exits 1,
+          // so --deep can clear a sign-accident hollow but can never manufacture a new block.
+          oneSidedBlocks++;
+          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'one-sided', oneSidedPairs });
         }
         else if (anyGutted) {
           const why = 'mutant ran 0 tests';
@@ -2591,7 +2721,11 @@ export function prove(dir, opts = {}) {
         }
         // Depth tier (opt-in): a fn the gross stub broke but an IDENTITY stub does not was only exercised on
         // a fixed point — the assertion does not pin the function's transformation. Advisory, not a finding.
+        // Suppressed for a fn with a production first-param identity branch (`return label`, `?: label`,
+        // `else a`, …): there the stub is indistinguishable from correct behavior and the branch's own
+        // tests survive it BY CONSTRUCTION — field-observed as 5/5 false advisories in one wild run.
         if (opts.deep) for (const { fn, abs, orig, lang } of brokeFns) {
+          if (hasFirstParamIdentityBranch(orig, fn, lang)) continue;
           const stub = passthroughBreak(orig, fn, lang);
           if (stub === null || stub === orig) continue;
           probes++;
@@ -2605,8 +2739,10 @@ export function prove(dir, opts = {}) {
         }
       }
     }
-  } finally { rmSync(work, { recursive: true, force: true }); }
-  const scored = caught + hollow.length;
+  } finally { rmSync(work, { recursive: true, force: true }); repoLock.release(); }
+  // scored counts VERDICTS: caught + hollow + (deep) one-sided blocks — a one-sided block is a real
+  // verdict on the test (binds one direction), it just never blocks.
+  const scored = caught + hollow.length + oneSidedBlocks;
 
   // Change classification: only meaningful when the run has a diff scope at all (opts.changed or
   // opts.since); otherwise there is no "changed set" to classify against, so both stay null. Reads the
@@ -2654,7 +2790,7 @@ export function prove(dir, opts = {}) {
   const hollowFns = new Set(hollow.flatMap((h) => h.survivors));
   const grossSurvivorsList = [...survivorTally.values()].filter((e) => e.survivedIn.length > 0 && e.caughtIn === 0 && !hollowFns.has(e.fn));
 
-  return { runner, scored, caught, hollow, weak, ...(opts.deep ? { weakSummary } : {}), inconclusive, skipped, outOfScope, probes, capped, pct: scored ? Math.round((caught / scored) * 100) : null, changedFileCount, changes, changeSummary, ...(grossSurvivorsList.length ? { grossSurvivors: grossSurvivorsList } : {}) };
+  return { runner, scored, caught, hollow, weak, oneSided, oneSidedBlocks, ...(opts.deep ? { weakSummary } : {}), inconclusive, skipped, outOfScope, probes, capped, envAborted, pct: scored ? Math.round((caught / scored) * 100) : null, changedFileCount, changes, changeSummary, ...(grossSurvivorsList.length ? { grossSurvivors: grossSurvivorsList } : {}) };
 }
 
 // Plain-English translation of a skip/inconclusive why-code, for the unverifiable section only — a
@@ -2663,18 +2799,30 @@ export function prove(dir, opts = {}) {
 // phrase; anything truly unrecognized falls back to the raw reason verbatim rather than hiding it.
 const UNVERIFIABLE_REASON_MSG = {
   'no-pin': 'only checks a mock / no value pinned',
+  'one-sided': 'the binding test detects only one direction of error',
+  'pin-unresolved': "pins a value the probe can't tie to a called function",
   'sut-unresolved': "can't locate the function from the test's imports",
   'dynamic-title': 'test name is computed at runtime',
   'ungutable': "function body can't be safely mutated",
   'instrumented-test': 'needs a device/emulator',
   'unsupported-source-set': 'unsupported Gradle source set',
   'probe-cap': 'not probed — probe cap or time budget reached (raise --max-probes/--time-budget)',
+  'env-abort': 'not probed — the run aborted after the first baselines all failed (likely wrong runner or broken build/environment)',
 };
 function readableUnverifiableReason(reason) {
   if (Object.prototype.hasOwnProperty.call(UNVERIFIABLE_REASON_MSG, reason)) return UNVERIFIABLE_REASON_MSG[reason];
   if (/^baseline |^did-not-run |^flaky baseline|^ambiguous title/.test(reason || '')) return 'the referencing test is inconclusive';
   if (/^runner-mismatch/.test(reason || '')) return "the detected runner can't run this test's language";
   return reason;
+}
+
+// r.hollow entries NOT already carried by a changed-function hollow row — the whole-scope findings every
+// human diff surface must render (the exit code counts them; see formatDiffReport's comment). Shared by
+// formatDiffReport here and formatMarkdown (mutation/gutcheck.mjs) so the two surfaces can never drift.
+export function extraHollowOf(r) {
+  const changeHollowBlocks = new Set((r.changes || []).filter((c) => c.status === 'hollow' && c.evidence && c.evidence.blocks)
+    .flatMap((c) => c.evidence.blocks.map((b) => `${b.file}:${b.line}`)));
+  return (r.hollow || []).filter((h) => !changeHollowBlocks.has(`${h.file}:${h.line}`));
 }
 
 // Full-suite human report (no diff scope — r.changeSummary is null). Pinned byte-for-byte by the
@@ -2685,7 +2833,15 @@ function formatFullScanReport(r) {
   const scope = r.outOfScope ? ` (${r.outOfScope} test blocks outside the diff)` : '';
   if (r.scored === 0 && (r.probes > 0 || (r.inconclusive || []).length > 0)) lines.push(`gutcheck: no verdicts — ${r.probes} test(s) probed, all inconclusive (${r.inconclusive.length} inconclusive, ${r.skipped.length} skipped). Runner: ${r.runner}.`);
   else if (r.scored === 0) lines.push(`gutcheck: no value-pinning tests to probe${scope} (${r.skipped.length} skipped, ${r.inconclusive.length} inconclusive). Runner: ${r.runner}.`);
-  else lines.push(`gutcheck: ${r.caught}/${r.scored} tests (${r.pct}%) fail when the function they test is broken.${scope}  [${r.probes} probes, runner: ${r.runner}]`);
+  else {
+    // Denominator-first headline: when tests were skipped or inconclusive, the
+    // one line that gets quoted must carry the coverage fraction — "verdicts on X of Y tests" — so it can
+    // never read as a whole-suite claim. A clean run (nothing skipped, nothing inconclusive) keeps the
+    // single-clause release format byte-for-byte: there the scored count IS the denominator.
+    const total = r.scored + (r.skipped || []).length + (r.inconclusive || []).length;
+    if (total > r.scored) lines.push(`gutcheck: verdicts on ${r.scored} of ${total} tests (${Math.round((r.scored / total) * 100)}%) — ${r.caught}/${r.scored} (${r.pct}%) fail when the function they test is broken.${scope}  [${r.probes} probes, runner: ${r.runner}]`);
+    else lines.push(`gutcheck: ${r.caught}/${r.scored} tests (${r.pct}%) fail when the function they test is broken.${scope}  [${r.probes} probes, runner: ${r.runner}]`);
+  }
   const baselineFailRows = (r.inconclusive || []).filter((i) => /^baseline /.test(i.why));
   const baselineFails = baselineFailRows.length;
   // The wipeout check counts BOTH 'baseline' (ran-and-failed) and 'did-not-run' (skip/zero-match/
@@ -2695,7 +2851,14 @@ function formatFullScanReport(r) {
   // baselineFailRows only, since a did-not-run row never earns the "already fail" label.
   const baselineOrDidNotRunCount = (r.inconclusive || []).filter((i) => /^(baseline|did-not-run) /.test(i.why)).length;
   const allBaselinesFailed = r.scored === 0 && baselineOrDidNotRunCount > 0 && baselineOrDidNotRunCount === (r.inconclusive || []).length && r.hollow.length === 0;
-  if (allBaselinesFailed)
+  // The env-abort fail-fast (prove()) and this wipeout hint compose into ONE line: when the run stopped
+  // after the first N baselines all failed, the hint states that fact (first N failed, likely wrong runner
+  // or broken build/environment, fix it or --runner=<r>, M remaining not probed) instead of the plain
+  // "every baseline run failed" phrasing — never two contradictory messages. r.envAborted is undefined on
+  // an older/hand-built result, so that path stays byte-identical.
+  if (allBaselinesFailed && r.envAborted)
+    lines.push(`every baseline run failed before any mutation — the first ${baselineOrDidNotRunCount} all failed, so probing stopped (likely the wrong runner or a broken build/environment). Fix it or pass --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>. ${r.envAborted} remaining block(s) not probed.`);
+  else if (allBaselinesFailed)
     lines.push(`every baseline run failed before any mutation — either these tests already fail, or the detected runner (${r.runner}) can't run them. Override with --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>.`);
   // PARTIAL baseline failures — a first-class signal (wild-pilot HEAD-rot finding: failing-at-HEAD tests
   // are common in the wild, and a partial set was previously silent here). A test that fails before any
@@ -2719,7 +2882,7 @@ function formatFullScanReport(r) {
   // an accusation the audit doesn't support. Never affects the exit code — advisory only.
   if (r.weak && r.weak.length) {
     lines.push('');
-    lines.push('identity-stub advisory (--deep): tests that pass when the function is replaced by a passthrough');
+    lines.push('identity-stub advisory (--deep): tests that pass when the function is replaced by a passthrough (counts are stub probes, not all binding tests)');
     // A passed:0 fn had every identity stub CAUGHT — a success story, not an advisory — so it is omitted
     // entirely (final-review wave, item 6). r.weak.length > 0 guarantees at least one fn has passed > 0.
     for (const fn of Object.keys(r.weakSummary || {})) {
@@ -2727,6 +2890,13 @@ function formatFullScanReport(r) {
       if (!passed) continue;
       lines.push(`  ~ ${fn}: ${passed} of ${stubbed} identity-stub probes passed — may cover only fixed points (no-op tests do this by design)`);
     }
+  }
+  // One-sided tier (--deep): tests red under exactly one sentinel — they bind one direction of error
+  // (threshold/comparison oracles). A verdict, never a blocker; each row states the two observed runs.
+  if (r.oneSided && r.oneSided.length) {
+    lines.push('');
+    lines.push('one-sided: tests that bind exactly one direction of error — red under one extreme sentinel, green under the other; never a blocker:');
+    for (const o of r.oneSided) lines.push(`  ~ ${o.file}:${o.line}  '${o.name}'  — ${o.fn}() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
   }
   // Side signals: two existing inconclusive buckets that were silent in the report — a flaky test
   // (unstable green re-run) and a title collision (two blocks share one runner selection). Neither is a
@@ -2761,10 +2931,18 @@ function formatDiffReport(r) {
   const provenPart = (cs.sameDiffProven || 0) > 0 ? ` (${cs.sameDiffProven} via tests changed in this diff)` : '';
   const provenWord = `${cs.proven} proven${provenPart}`;
   const notProbedPart = (cs.notProbed || 0) > 0 ? ` · ${cs.notProbed} not probed (cap)` : '';
+  // Whole-scope hollows the changed-function rows don't carry: the exit code counts r.hollow across the
+  // WHOLE probed scope (a touched test file is probed whole-file), so a hollow whose survivor is not a
+  // changed function would otherwise exit 1 with a headline reading "0 hollow" — a silent false negative
+  // on THIS surface, the one a first-run user reads. extraHollowOf is the same set-subtraction
+  // formatMarkdown (mutation/gutcheck.mjs) renders as its ❌ section; both the headline fragment and the
+  // section below render only when non-empty, so a run with none stays byte-identical.
+  const extraHollow = extraHollowOf(r);
+  const extraHollowPart = extraHollow.length ? ` · ${extraHollow.length} HOLLOW beyond the diff` : '';
   const body = cs.hollow > 0
     ? `${provenWord}, ${cs.hollow} HOLLOW, ${cs.untested} with no binding test`
     : `${provenWord}, ${cs.untested} with no binding test, ${cs.hollow} hollow`;
-  lines.push(`gutcheck: ${fnsWord} — ${body}${unverifiablePart}${notProbedPart}.`);
+  lines.push(`gutcheck: ${fnsWord} — ${body}${unverifiablePart}${notProbedPart}${extraHollowPart}.`);
 
   // Baseline-already-failing tests: prominent, never folded into the footnote — a probed test that fails
   // before any mutation verifies nothing until it passes, and the reviewer should fix it first.
@@ -2774,7 +2952,11 @@ function formatDiffReport(r) {
   // baselineFailRows only — a did-not-run row never earns the "already fail" label.
   const baselineOrDidNotRunCount = (r.inconclusive || []).filter((i) => /^(baseline|did-not-run) /.test(i.why)).length;
   const allBaselinesFailed = r.scored === 0 && baselineOrDidNotRunCount > 0 && baselineOrDidNotRunCount === (r.inconclusive || []).length && r.hollow.length === 0;
-  if (allBaselinesFailed) {
+  if (allBaselinesFailed && r.envAborted) {
+    // See formatFullScanReport's twin: the env-abort tail folds INTO the wipeout hint, one coherent line.
+    lines.push('');
+    lines.push(`every baseline run failed before any mutation — the first ${baselineOrDidNotRunCount} all failed, so probing stopped (likely the wrong runner or a broken build/environment). Fix it or pass --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>. ${r.envAborted} remaining block(s) not probed.`);
+  } else if (allBaselinesFailed) {
     lines.push('');
     lines.push(`every baseline run failed before any mutation — either these tests already fail, or the detected runner (${r.runner}) can't run them. Override with --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>.`);
   } else if (baselineFailRows.length > 0) {
@@ -2803,6 +2985,11 @@ function formatDiffReport(r) {
         : `survives gutting ${c.fn}()`;
       lines.push(`  ✗ ${b.file}:${b.line}  '${b.name}'  — ${tail}`);
     }
+  }
+  if (extraHollow.length) {
+    lines.push('');
+    lines.push(`hollow beyond the changed functions — a touched test file is probed whole-file, and these tests pass even when the function they verify is gutted; fix the test (receipt: gutcheck --explain <file:line>) (${extraHollow.length}):`);
+    for (const h of extraHollow) lines.push(`  ✗ ${h.file}:${h.line}  '${h.name}'  — still passes when ${(h.survivors || []).join(', ')}() is gutted`);
   }
   const untestedFns = byStatus('untested');
   if (untestedFns.length) {
@@ -2833,12 +3020,18 @@ function formatDiffReport(r) {
   // Identity-stub advisory (--deep): see formatFullScanReport's comment — same per-function ratios.
   if (r.weak && r.weak.length) {
     lines.push('');
-    lines.push('identity-stub advisory (--deep): tests that pass when the function is replaced by a passthrough');
+    lines.push('identity-stub advisory (--deep): tests that pass when the function is replaced by a passthrough (counts are stub probes, not all binding tests)');
     for (const fn of Object.keys(r.weakSummary || {})) {
       const { stubbed, passed } = r.weakSummary[fn];
       if (!passed) continue;
       lines.push(`  ~ ${fn}: ${passed} of ${stubbed} identity-stub probes passed — may cover only fixed points (no-op tests do this by design)`);
     }
+  }
+  // One-sided tier (--deep): see formatFullScanReport's comment — same tier, same rows.
+  if (r.oneSided && r.oneSided.length) {
+    lines.push('');
+    lines.push('one-sided: tests that bind exactly one direction of error — red under one extreme sentinel, green under the other; never a blocker:');
+    for (const o of r.oneSided) lines.push(`  ~ ${o.file}:${o.line}  '${o.name}'  — ${o.fn}() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
   }
   // Side signals (flaky rerun instability / title collision) — see formatFullScanReport's comment.
   const flakyN = (r.inconclusive || []).filter((i) => /^flaky baseline/.test(i.why)).length;
@@ -2861,7 +3054,8 @@ export function formatReport(r) {
 }
 
 // CLI: gutcheck prove [dir] [--since=<ref>] [--files=substr,substr] [--runner=R] [--deep] [--json]
-//   --deep adds the identity-stub advisory (fixed-point-weak tests); it never changes the exit code.
+//   --deep adds the identity-stub advisory (fixed-point-weak tests) and the opposite-sentinel probe
+//   (one-sided threshold oracles); advisories only — it never changes a verdict or the exit code.
 //   --json prints JSON.stringify(result) instead of the human report (consumed by the Stop hook); the
 //   exit code is unchanged (1 if any hollow, 2 on a scope error, else 0).
 export function main(argv) {

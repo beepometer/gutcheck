@@ -13,14 +13,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# benchmark: the studies' scripts, corpora, and result docs are tracked; regenerated outputs are not
-benchmark/*
-!benchmark/evidence/
-!benchmark/loop-pilot/
-!benchmark/kotlin-pilot/
-benchmark/evidence/results*
-benchmark/loop-pilot/mbpp*.json
-benchmark/kotlin-pilot/*.json
+# internal studies — never shipped
+benchmark/
 
 # JVM probe fixture build output
 test/fixtures/jvm-project/.gradle/

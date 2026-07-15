@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runGate, HARNESSES } from '../mutation/gate.mjs';
+import { lockPathFor } from '../mutation/lock.mjs';
 
 const SUT = 'export function total(items){ return items.reduce((s,i)=>s+i.p*i.q,0); }\n';
 const H = "import { test } from 'node:test'; import assert from 'node:assert';";
@@ -201,4 +202,20 @@ test('gate-core: memo cross-version — a memo the new core writes matches the k
     const oldStyleKey = execFileSync('git', ['hash-object', '--stdin'], { input: diffOut, encoding: 'utf8' }).trim();
     assert.equal(newLineKey, oldStyleKey, 'an old bash hook reading this new memo mid-upgrade must recognize it as fresh for this no-untracked-file diff');
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// ---- probe lock vs the gate (mutation/lock.mjs): while another gutcheck run holds the repo lock, the
+// Stop hook must yield (no block, no collision) AND must NOT memoize the refusal — a cached "run didn't
+// happen" keyed by this diff-hash would suppress every later gate on the same diff. Oracle: the same
+// hollow fixture that blocks in test (a) must still block AFTER the lock clears.
+test('gate-core: a held repo lock yields silently and is never memoized — the gate still blocks once the lock clears', () => {
+  const d = repo({ testCode: HOLLOW });
+  writeFileSync(lockPathFor(d), JSON.stringify({ pid: process.ppid, started: '2026-07-14T00:00:00Z' }));
+  const whileHeld = runGate({ harnessName: 'claude', dir: d, stdinText: stopEvent(false), env: {} });
+  assert.equal(whileHeld, null, 'the gate yields to the active run — no block, no second Gradle');
+  rmSync(lockPathFor(d), { force: true });
+  const afterClear = runGate({ harnessName: 'claude', dir: d, stdinText: stopEvent(false), env: {} });
+  assert.ok(afterClear !== null, 'the refusal was not cached — the hollow still blocks on the next stop');
+  assert.match(afterClear, /stays green/, 'the block payload is the real verdict, not a residue of the refusal');
+  rmSync(d, { recursive: true, force: true });
 });

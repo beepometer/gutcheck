@@ -207,6 +207,7 @@ export function classifyChanges(changedByFile, blockRecords) {
     if (b.verdict === 'skipped' || b.verdict === 'inconclusive') return true;
     if (b.verdict === 'caught') return !(b.caughtPairs || []).some((p) => p.fn === fn && p.sutRel === file);
     if (b.verdict === 'hollow') return !(b.survivorPairs || []).some((p) => p.fn === fn && p.sutRel === file);
+    if (b.verdict === 'one-sided') return !(b.oneSidedPairs || []).some((p) => p.fn === fn && p.sutRel === file);
     return false;
   };
   for (const { file, granularity, decls } of changedByFile) {
@@ -238,6 +239,17 @@ export function classifyChanges(changedByFile, blockRecords) {
         changes.push({ file, fn, line, status: 'proven', granularity, evidence: { blocks, sameDiffOracle } });
         continue;
       }
+      // One-sided (--deep): the fn's binding test went red under exactly one sentinel. A real, partial
+      // binding — neither proven nor hollow. Classified 'unverifiable' with its own reason (conservative:
+      // never a manufactured proven, never a false accusation); the full-scan one-sided section carries
+      // the per-run facts. Any block verdict can carry oneSidedPairs (a caught block's sibling fn may be
+      // one-sided), so membership — not verdict — is the test. After provenIn: a fn FULLY bound by some
+      // other test stays proven.
+      const oneSidedIn = blockRecords.filter((b) => (b.oneSidedPairs || []).some((p) => p.fn === fn && p.sutRel === file));
+      if (oneSidedIn.length) {
+        changes.push({ file, fn, line, status: 'unverifiable', granularity, evidence: { reason: 'one-sided', blocks: pick(oneSidedIn) } });
+        continue;
+      }
       // wrongLayerShadow (mutation/wrongLayerShadow.mjs): a block that is BOTH zero-production-contact AND
       // a self-echo/tautological assertion (prove() attaches both signals — JVM-only — to the blockRecord;
       // see its header comment for the conjunction's soundness argument + why the hard hollow is JVM-gated)
@@ -263,7 +275,13 @@ export function classifyChanges(changedByFile, blockRecords) {
           const why = (b.verdict === 'caught' || b.verdict === 'hollow') ? 'no-pin' : (b.why || 'inconclusive');
           reasons[why] = (reasons[why] || 0) + 1;
         }
-        const reason = Object.entries(reasons).sort((a, b) => b[1] - a[1])[0][0];
+        // Count wins outright; on a TIE an execution-observed reason ('ungutable' — the engine really
+        // gutted and the mutant failed to compile — or a runner-observed inconclusive) outranks a purely
+        // static scan reason (no-pin/pin-unresolved/sut-unresolved/…). Object.entries insertion order
+        // otherwise picks whichever block sits earlier in the file, silently burying an engine-VERIFIED
+        // fact behind a weaker static guess (public issue #3, defect B).
+        const EXECUTION_WHY = /^(?:ungutable$|baseline |did-not-run |flaky baseline|ambiguous title)/;
+        const reason = Object.entries(reasons).sort((a, b) => (b[1] - a[1]) || (EXECUTION_WHY.test(b[0]) - EXECUTION_WHY.test(a[0])))[0][0];
         changes.push({ file, fn, line, status: 'unverifiable', granularity, evidence: { reason, reasons, blocks: pick(refs) } });
         continue;
       }

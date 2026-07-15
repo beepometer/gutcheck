@@ -23,14 +23,15 @@ Activation for the Claude Code plugin (`dist/gutcheck`).
   (falling back to `HEAD` when no baseline is recorded), memoized per diff-hash so an
   unchanged diff is not re-probed across Stop turns. It returns `decision: block` with the
   fix guidance on `hookSpecificOutput.additionalContext` on two execution-backed signals: a
-  test that is **proven HOLLOW** (stays green even when the function it covers is gutted),
+  test that is **proven HOLLOW** (stays green when the function it covers is gutted — and again
+  under the opposite-signed gut, so the accusation is never a sign accident),
   or a changed test that already fails before any mutation runs. Probing from the baseline
   rather than `HEAD` means work the agent already committed this session is still caught. On
   a clean run that changed probeable functions it emits a one-line, non-blocking
   `systemMessage` (proven / untested / unverifiable counts); if a flagged test is left
   unfixed after the one forced retry, the next finishing turn carries a one-line non-blocking
   residue notice instead of silence. **Loop-safe:** it reads the Stop hook's
-  `stop_hook_active` and blocks at most once — one forced attempt — so it can never loop.
+  `stop_hook_active` and blocks at most once (one forced attempt), so it can never loop.
   Fail-open (any error, missing tool, or a failed self-check → exit 0), bounded by a 120s
   timeout and a 90s probe wall-clock budget.
 

@@ -7,7 +7,7 @@
 [INFO] 
 [INFO] --- resources:3.3.1:resources (default-resources) @ mfeas ---
 [WARNING] Using platform encoding (UTF-8 actually) to copy filtered resources, i.e. build is platform dependent!
-[INFO] skip non existing resourceDirectory /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/main/resources
+[INFO] skip non existing resourceDirectory /tmp/work/mfeas/src/main/resources
 [INFO] 
 [INFO] --- compiler:3.11.0:compile (default-compile) @ mfeas ---
 [INFO] Changes detected - recompiling the module! :source
@@ -16,7 +16,7 @@
 [INFO] -------------------------------------------------------------
 [ERROR] COMPILATION ERROR : 
 [INFO] -------------------------------------------------------------
-[ERROR] /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/main/java/demo/Calc.java:[2,98] incompatible types: java.lang.String cannot be converted to int
+[ERROR] /tmp/work/mfeas/src/main/java/demo/Calc.java:[2,98] incompatible types: java.lang.String cannot be converted to int
 [INFO] 1 error
 [INFO] -------------------------------------------------------------
 [INFO] ------------------------------------------------------------------------
@@ -26,7 +26,7 @@
 [INFO] Finished at: 2026-07-09T12:08:52+04:00
 [INFO] ------------------------------------------------------------------------
 [ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile (default-compile) on project mfeas: Compilation failure
-[ERROR] /private/tmp/claude-931780127/-Users-gmarkov-Apps-skeptic/e8bed57b-cfa5-4524-863e-0b186c367792/scratchpad/mfeas/src/main/java/demo/Calc.java:[2,98] incompatible types: java.lang.String cannot be converted to int
+[ERROR] /tmp/work/mfeas/src/main/java/demo/Calc.java:[2,98] incompatible types: java.lang.String cannot be converted to int
 [ERROR] 
 [ERROR] -> [Help 1]
 [ERROR] 

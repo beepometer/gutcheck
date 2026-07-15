@@ -595,3 +595,31 @@ test('classifyChanges (fn, sutRel) pair attribution: a caught/hollow record with
   assert.notEqual(hollowNoPairs.changes[0].status, 'hollow');
   assert.equal(hollowNoPairs.changes[0].status, 'unverifiable');
 });
+
+// ---- Reason rollup tie-break (public issue #3, defect B): at equal count, an execution-observed reason
+// ('ungutable' — the engine really gutted and the mutant failed to compile) must outrank a purely-static
+// scan reason ('no-pin') — Object.entries insertion order otherwise silently picks whichever block sits
+// earlier in the file, burying an engine-VERIFIED fact behind a weaker static guess. Oracle hand-derived:
+// 1×no-pin + 1×ungutable is a tie, and the execution-observed side is the defined winner.
+test('unverifiable reason rollup: on a count tie, execution-observed (ungutable) beats static (no-pin) regardless of block order', () => {
+  const changed = [{ file: 'src/geo.kt', granularity: 'file', decls: [{ fn: 'boundingBoxM', line: 1, endLine: 3 }] }];
+  const blocks = [
+    { file: 't/g.test.kt', line: 2, name: 'destructured', bodyMasked: 'val (l, w) = boundingBoxM(sq)', verdict: 'skipped', why: 'no-pin' },
+    { file: 't/g.test.kt', line: 9, name: 'direct', bodyMasked: 'assertEquals(z, boundingBoxM(e))', verdict: 'skipped', why: 'ungutable' },
+  ];
+  const { changes } = classifyChanges(changed, blocks);
+  assert.equal(changes[0].status, 'unverifiable');
+  assert.deepEqual(changes[0].evidence.reasons, { 'no-pin': 1, ungutable: 1 }, 'both facts stay visible in the tally');
+  assert.equal(changes[0].evidence.reason, 'ungutable', 'the execution-observed reason is the dominant one');
+});
+
+test('unverifiable reason rollup: a strictly higher static count still wins outright (tie-break only)', () => {
+  const changed = [{ file: 'src/geo.kt', granularity: 'file', decls: [{ fn: 'scaleM', line: 1, endLine: 3 }] }];
+  const blocks = [
+    { file: 't/g.test.kt', line: 2, name: 'a', bodyMasked: 'scaleM(1)', verdict: 'skipped', why: 'no-pin' },
+    { file: 't/g.test.kt', line: 9, name: 'b', bodyMasked: 'scaleM(2)', verdict: 'skipped', why: 'no-pin' },
+    { file: 't/g.test.kt', line: 16, name: 'c', bodyMasked: 'assertEquals(z, scaleM(3))', verdict: 'skipped', why: 'ungutable' },
+  ];
+  const { changes } = classifyChanges(changed, blocks);
+  assert.equal(changes[0].evidence.reason, 'no-pin', 'count dominance is unchanged — priority applies only at a tie');
+});

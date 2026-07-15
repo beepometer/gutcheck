@@ -308,23 +308,62 @@ test('agent gate e2e: the Stop hook blocks on a planted hollow Kotlin test and v
   } finally { rmSync(w2, { recursive: true, force: true }); }
 });
 
+// ---- Root-module KMP task selection (pure function, no gradle): kotlin("multiplatform") at the
+// repo ROOT puts tests at src/jvmTest/... with no module prefix — the jvmTest branch must match a
+// rel with no leading slash. Wild specimen: sunny-chung/giant-log-viewer, where the unanchored
+// match fell through to the nonexistent `test` task (fail-closed did-not-run, but it zeroes the
+// whole root-module-KMP repo class even with a warm cache).
+test('gradleTaskInfo: root-module KMP src/jvmTest selects jvmTest, not test', () => {
+  const gi = gradleTaskInfo('/nonexistent-kmp-root', 'src/jvmTest/kotlin/com/x/ReaderTest.kt');
+  assert.equal(gi.unitTask, 'jvmTest');
+  assert.equal(gi.taskPath, 'jvmTest');
+  assert.equal(gi.resultsDir, join('build', 'test-results', 'jvmTest'));
+});
+
+test('gradleTaskInfo: root-module commonTest with a declared jvm() target selects jvmTest', () => {
+  const w = mkdtempSync(join(tmpdir(), 'gc-kmp-root-'));
+  try {
+    writeFileSync(join(w, 'build.gradle.kts'), 'kotlin {\n    jvm()\n}\n');
+    const gi = gradleTaskInfo(w, 'src/commonTest/kotlin/com/x/CommonTest.kt');
+    assert.equal(gi.taskPath, 'jvmTest');
+  } finally { rmSync(w, { recursive: true, force: true }); }
+});
+
+test('gradleTaskInfo: module-prefixed KMP and root plain-JVM selection are unchanged', () => {
+  assert.equal(gradleTaskInfo('/nonexistent', 'protocol/src/jvmTest/kotlin/Foo.kt').taskPath, ':protocol:jvmTest');
+  assert.equal(gradleTaskInfo('/nonexistent', 'src/test/kotlin/FooTest.kt').taskPath, 'test');
+});
+
 // ---- Android extension (opt-in, env-gated): the plain-JVM fixture above never exercises AGP's
 // `testDebugUnitTest` branch of gradleTaskInfo/runOne — that needs a real Android module (a synthetic
-// fixture would have to fake the whole AGP + Robolectric toolchain). Point GUTCHECK_ANDROID_E2E_PROJ at
-// a local Android app repo (single :app module, unit tests present) to enable; the tests drive a work
-// copy only, read-only to the original. Skipped everywhere the env var or the SDK is absent.
+// fixture would have to fake the whole AGP + Robolectric toolchain). Bring your own app repo
+// (single :app module, unit tests present) and name the probe targets:
+//   GUTCHECK_ANDROID_E2E_PROJ       path to the repo (driven via a work copy, read-only to the original)
+//   GUTCHECK_ANDROID_E2E_TEST       repo-relative path of a unit-test .kt file
+//   GUTCHECK_ANDROID_E2E_FQN        qualified test method in that file (class FQN + '.' + method)
+//   GUTCHECK_ANDROID_E2E_SUT        repo-relative path of the SUT .kt the test exercises
+//   GUTCHECK_ANDROID_E2E_STRING_FN  a pure String-returning fn in the SUT whose literal the test pins
+//   GUTCHECK_ANDROID_E2E_BOOL_FN    a Boolean-returning fn in the same SUT (compile-fail leg)
+// Selection criteria: the test must pin a String literal from STRING_FN and call it DIRECTLY (no
+// ViewModel/mock indirection) — grossBreak's String sentinel is then guaranteed type-compatible
+// (COMPILES) and guaranteed to violate the pin (CAUGHT). Avoid tests whose pinned value is set as a
+// side effect of a Unit-returning method: the numeric sentinel in a Unit-inferred body is a Kotlin
+// type error (compile-fail, not the required CAUGHT shape). Skipped unless every var + an SDK is set.
 const ANDROID_PROJ = process.env.GUTCHECK_ANDROID_E2E_PROJ || '';
+const TEST_FILE_REL = process.env.GUTCHECK_ANDROID_E2E_TEST || '';
+const SUT_FILE_REL = process.env.GUTCHECK_ANDROID_E2E_SUT || '';
+const QUALIFIED = process.env.GUTCHECK_ANDROID_E2E_FQN || '';
+const STRING_FN = process.env.GUTCHECK_ANDROID_E2E_STRING_FN || '';
+const BOOL_FN = process.env.GUTCHECK_ANDROID_E2E_BOOL_FN || '';
 const SDK = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT
   || (existsSync(join(homedir(), 'Library/Android/sdk')) ? join(homedir(), 'Library/Android/sdk') : null);
-const aopts = (haveJava && SDK && ANDROID_PROJ && existsSync(ANDROID_PROJ))
-  ? {} : { skip: 'Android e2e is opt-in: set GUTCHECK_ANDROID_E2E_PROJ to a local Android app repo (and have an SDK)' };
+const aopts = (haveJava && SDK && ANDROID_PROJ && existsSync(ANDROID_PROJ) && TEST_FILE_REL && SUT_FILE_REL && QUALIFIED && STRING_FN && BOOL_FN)
+  ? {} : { skip: 'Android e2e is opt-in: set the GUTCHECK_ANDROID_E2E_* vars to a local Android app repo and its probe targets (and have an SDK)' };
 
 // Copies only what the :app module's Gradle build reads (app/ minus build/.gradle, plus the root
-// wrapper/settings/build files) rather than the whole ~1.7 GB repo: RoomAcoustics-2 also carries a
-// ~1 GB reference/ corpus, a functions/ (Firebase) tree, docs/, and .git that :app:testDebugUnitTest
-// never touches for the test class this file selects (two systemProperty paths in app/build.gradle.kts
-// DO point at reference/ and .claude/, but both are registered `.optional(true)` task inputs consumed
-// only by test classes — ReferenceKbConsistencyTest, CitationLocatorGuardTest — this e2e never runs).
+// wrapper/settings/build files) rather than the whole repo: a real app repo can carry large non-app
+// trees (reference corpora, cloud-function packages, docs/, .git) that :app:testDebugUnitTest never
+// touches for the selected test class.
 function androidWorkCopy() {
   const w = mkdtempSync(join(tmpdir(), 'gc-android-e2e-'));
   cpSync(join(ANDROID_PROJ, 'app'), join(w, 'app'), { recursive: true, filter: (s) => !/([\\/])(\.gradle|build)([\\/]|$)/.test(s) });
@@ -335,19 +374,6 @@ function androidWorkCopy() {
   writeFileSync(join(w, 'local.properties'), `sdk.dir=${SDK}\n`);
   return w;
 }
-
-// Pinned test: EdtRt60RatioTest.note_aroundOne_isDiffuse asserts
-// assertEquals("Diffuse field", edtRt60RatioNote(1.0f)) against a pure, one-line String-returning
-// function in ResultLogic.kt that the test calls directly (no ViewModel/mockk indirection) — so
-// grossBreak's String sentinel is guaranteed type-compatible (COMPILES) and guaranteed to violate the
-// pinned literal (CAUGHT). Chosen over the task brief's suggested MicCalibrationStatusTypedTest /
-// RoomViewModelLiveEqTest candidates after reading both: their pinned values (CalMessageStatus,
-// liveEqEnabledFilterIndices) are set as a SIDE EFFECT of a Unit-returning RoomViewModel method
-// (runMicCalibration / toggleLiveEqFilter / enableAllLiveEqFilters) — grossBreak's numeric sentinel in
-// a Unit-inferred body is a Kotlin type error there (compile-fail, not the required CAUGHT shape).
-const TEST_FILE_REL = 'app/src/test/java/com/roomacoustics/ui/screens/result/EdtRt60RatioTest.kt';
-const SUT_FILE_REL = 'app/src/main/java/com/roomacoustics/ui/screens/result/ResultLogic.kt';
-const QUALIFIED = 'com.roomacoustics.ui.screens.result.EdtRt60RatioTest.note_aroundOne_isDiffuse';
 
 test('android e2e: gradleTaskInfo resolves the AGP module to :app:testDebugUnitTest', aopts, () => {
   const gi = gradleTaskInfo(ANDROID_PROJ, TEST_FILE_REL);
@@ -367,18 +393,18 @@ test('android e2e: testDebugUnitTest mutant cycle on a real Android module (base
     assert.ok(baseline.passed >= 1 && baseline.failed === 0, `baseline: ${JSON.stringify({ passed: baseline.passed, failed: baseline.failed })}`);
 
     const sutAbs = join(w, SUT_FILE_REL);
-    const mutated = grossBreak(readFileSync(sutAbs, 'utf8'), 'edtRt60RatioNote', 'kotlin');
-    assert.ok(mutated, 'grossBreak must locate edtRt60RatioNote in ResultLogic.kt');
+    const mutated = grossBreak(readFileSync(sutAbs, 'utf8'), STRING_FN, 'kotlin');
+    assert.ok(mutated, `grossBreak must locate ${STRING_FN} in ${SUT_FILE_REL}`);
     writeFileSync(sutAbs, mutated);
 
     const mutant = runOne(w, 'gradle', TEST_FILE_REL, QUALIFIED, 600000);
     assert.equal(mutant.compiled, true, `mutant should still compile (String-typed sentinel):\n${mutant.out.slice(-4000)}`);
-    assert.ok(mutant.failed >= 1, `mutant should fail the pinned "Diffuse field" assertion (CAUGHT): ${JSON.stringify({ passed: mutant.passed, failed: mutant.failed })}`);
+    assert.ok(mutant.failed >= 1, `mutant should fail the pinned String assertion (CAUGHT): ${JSON.stringify({ passed: mutant.passed, failed: mutant.failed })}`);
   } finally { rmSync(w, { recursive: true, force: true }); }
 });
 
-// Compile-fail (ungutable) leg: thdSectionVisibleOnScreen is Boolean-returning, so gutValueFor's
-// numeric default sentinel is a genuine Kotlin type error — this real module surfaced a real gap in
+// Compile-fail (ungutable) leg: BOOL_FN is Boolean-returning, so gutValueFor's
+// numeric default sentinel is a genuine Kotlin type error — a real module surfaced a real gap in
 // runOne's compiled-detection: AGP names the task `compileDebugKotlin` (build-variant-qualified), not
 // the plain-JVM-plugin's bare `compileKotlin`, so the old `/compile(Kotlin|Java) FAILED/` regex missed
 // it and misreported compiled:true on a build that never produced fresh test XML. Fixed in prove.mjs's
@@ -387,8 +413,8 @@ test('android e2e: compile-failing mutant → compiled=false, no fresh XML (ungu
   const w = androidWorkCopy();
   try {
     const sutAbs = join(w, SUT_FILE_REL);
-    const mutated = grossBreak(readFileSync(sutAbs, 'utf8'), 'thdSectionVisibleOnScreen', 'kotlin');
-    assert.ok(mutated, 'grossBreak must locate thdSectionVisibleOnScreen in ResultLogic.kt');
+    const mutated = grossBreak(readFileSync(sutAbs, 'utf8'), BOOL_FN, 'kotlin');
+    assert.ok(mutated, `grossBreak must locate ${BOOL_FN} in ${SUT_FILE_REL}`);
     writeFileSync(sutAbs, mutated);
 
     const r = runOne(w, 'gradle', TEST_FILE_REL, QUALIFIED, 600000);

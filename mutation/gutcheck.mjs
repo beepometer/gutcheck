@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // gutcheck — prove your AI-written tests actually test your code. It guts each tested function with a
-// guaranteed-wrong return and reruns only that test; a test that still passes is HOLLOW (it doesn't test
-// that function). Default action: run the probe over your tests (scope with --since) and report the
-// hollow ones. Fronted by a self-check ("won't run until it catches its own planted fake test").
+// guaranteed-wrong return and reruns only that test; a survivor is re-gutted with the opposite-signed
+// return before any accusation — green under BOTH is HOLLOW (it can't detect that function breaking),
+// red under exactly one is one-sided (never a blocker). Default action: run the probe over your tests
+// (scope with --since) and report the hollow ones. Fronted by a self-check ("won't run until it catches
+// its own planted fake test").
 import { readFileSync, realpathSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { prove, formatReport, parseBlocks, RUNNERS } from './prove.mjs';
+import { prove, formatReport, parseBlocks, RUNNERS, extraHollowOf } from './prove.mjs';
 import { selfCheck } from './selfcheck.mjs';
 import { configForProject } from '../checker/standalone.mjs';
 import { runChecker } from '../checker/core.mjs';
@@ -27,6 +29,8 @@ const HELP = `gutcheck ${VERSION} — prove your AI-written tests actually test 
   gutcheck --explain <file:line>    show the proof for one test: the mutation applied + before/after result
   gutcheck [path] --max-probes=<n>  cap the number of functions probed (default 40; bounds latency on a big diff)
   gutcheck [path] --time-budget=<s>   wall-clock cap for the probe pass; capped blocks report as unverifiable (probe-cap)
+  gutcheck [path] --deep            costlier evidence, same coverage: both-sentinel checks extend to proven fns
+                                    (one-direction-only proofs demote to one-sided) + the identity-stub advisory
   gutcheck [path] --no-fallback     never widen an empty --since scope to a full-suite scan (used by the agent hook)
   gutcheck [path] --format=sarif    SARIF 2.1.0 for CI code-scanning upload (no banners)
   gutcheck [path] --format=github   GitHub ::error inline PR annotations (no banners)
@@ -39,18 +43,29 @@ const HELP = `gutcheck ${VERSION} — prove your AI-written tests actually test 
 
 // "probed N · runner=X · M skipped · K out of diff scope" — every run says what it actually did, so a
 // zero-finding run reads as "verified N bite", not "did nothing".
-function banner(r) {
+// Skip labels: known codes get the short human phrase; a code missing here renders VERBATIM rather than
+// vanishing — the itemized counts must always sum to the skipped total (a hardcoded if-chain here once
+// left a third of a wild run's skips unattributed).
+const SKIP_LABELS = new Map([
+  ['no-pin', 'no value-pinning assertion'],
+  ['sut-unresolved', 'tested function not locatable'],
+  ['ungutable', 'function body not guttable'],
+  ['dynamic-title', 'test title is dynamic (template interpolation)'],
+  ['instrumented-test', 'instrumented androidTest (not supported)'],
+  ['unsupported-source-set', 'unsupported KMP source set'],
+  ['pin-unresolved', 'pin not tied to a called function'],
+  ['probe-cap', 'not probed (cap/time budget)'],
+  ['env-abort', 'not probed (env abort)'],
+]);
+export function banner(r) {
   if (r.scopeError) return '';
   const bits = [`probed ${r.probes} function${r.probes === 1 ? '' : 's'}`, `runner=${r.runner}`];
   if (r.skipped && r.skipped.length) {
-    const n = (w) => r.skipped.filter((s) => s.why === w).length;
+    const counts = new Map();
+    for (const s of r.skipped) counts.set(s.why, (counts.get(s.why) || 0) + 1);
     const parts = [];
-    if (n('no-pin')) parts.push(`${n('no-pin')} no value-pinning assertion`);
-    if (n('sut-unresolved')) parts.push(`${n('sut-unresolved')} tested function not locatable`);
-    if (n('ungutable')) parts.push(`${n('ungutable')} function body not guttable`);
-    if (n('dynamic-title')) parts.push(`${n('dynamic-title')} test title is dynamic (template interpolation)`);
-    if (n('instrumented-test')) parts.push(`${n('instrumented-test')} instrumented androidTest (not supported)`);
-    if (n('unsupported-source-set')) parts.push(`${n('unsupported-source-set')} unsupported KMP source set`);
+    for (const [why] of SKIP_LABELS) if (counts.has(why)) { parts.push(`${counts.get(why)} ${SKIP_LABELS.get(why)}`); counts.delete(why); }
+    for (const why of [...counts.keys()].sort()) parts.push(`${counts.get(why)} ${why}`);
     bits.push(`${r.skipped.length} skipped (${parts.join(', ') || 'not probeable'})`);
   }
   if (r.outOfScope) bits.push(`${r.outOfScope} out of diff scope`);
@@ -161,9 +176,8 @@ export function formatMarkdown(r) {
   // Every hollow the run found must appear on THIS surface: the exit code counts r.hollow across the
   // whole probed scope (a touched test file is probed whole-file), so a hollow whose function is not a
   // changed-function row would otherwise fail the check with no visible receipt in the PR comment.
-  const changeHollowBlocks = new Set(r.changes.filter((c) => c.status === 'hollow' && c.evidence && c.evidence.blocks)
-    .flatMap((c) => c.evidence.blocks.map((b) => `${b.file}:${b.line}`)));
-  const extraHollow = (r.hollow || []).filter((h) => !changeHollowBlocks.has(`${h.file}:${h.line}`));
+  // Same extraHollowOf set-subtraction the default report (prove.mjs formatDiffReport) renders.
+  const extraHollow = extraHollowOf(r);
   if (extraHollow.length) {
     lines.push('');
     lines.push(`❌ ${extraHollow.length} hollow test(s) found in the probed scope beyond the changed functions:`);
@@ -196,6 +210,16 @@ export function formatMarkdown(r) {
     }
     lines.push('');
     lines.push('_May cover only fixed points — no-op tests pass identity stubs by design._');
+  }
+  // One-sided tier (--deep) — mirrors formatReport's human variant: tests red under exactly one
+  // sentinel bind one direction of error. A verdict, never a blocker.
+  if (r.oneSided && r.oneSided.length) {
+    lines.push('');
+    lines.push('#### One-sided');
+    lines.push('');
+    for (const o of r.oneSided) lines.push(`- ${o.file}:${o.line} '${o.name}' — \`${o.fn}\`() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
+    lines.push('');
+    lines.push('_Binds exactly one direction of error (a threshold/comparison oracle) — never a blocker._');
   }
   if (r.caught > 0) {
     lines.push('');
@@ -472,4 +496,7 @@ export function main(argv) {
 
 // realpathSync resolves the .bin/gutcheck symlink npm installs (argv[1] is the symlink, not this file).
 function isMain(metaUrl) { try { return !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(metaUrl); } catch { return false; } }
-if (isMain(import.meta.url)) process.exit(main(process.argv.slice(2)));
+// exitCode, never process.exit(): exit() discards stdout still draining into a pipe, so a --json
+// report past the 64KB pipe buffer reaches the consumer (the agent hook, CI) truncated with exit 0.
+// main() is fully synchronous, so the process ends as soon as the buffers flush.
+if (isMain(import.meta.url)) process.exitCode = main(process.argv.slice(2));
