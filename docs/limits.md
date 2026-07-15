@@ -20,7 +20,7 @@ A test is probed only if it pins a concrete value and the tested function can be
 test file's imports. Direct calls and constructed instances both resolve inline (`new X().m()` /
 `X().m()`) or via a variable across JS/TS, Kotlin/Java, and Python; ambiguous or
 mock-constructed receivers are skipped, never guessed. Tests importing build output such as `dist/`
-are typically unverifiable — build output is never mutated.
+are typically unverifiable—build output is never mutated.
 
 Reach is bimodal: strong on value-pinning pure-logic code, much thinner on DSL-heavy, mock-heavy,
 UI, or dependency-injection-heavy code, where few functions can be probed at all. There the

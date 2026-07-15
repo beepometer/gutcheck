@@ -2,6 +2,8 @@
 
 **2 functions changed** · proven 1 · hollow 0 · unverifiable 0 · untested 1
 
+*probed 1 fn · 1/1 bound · 0 tests skipped · runner node*
+
 | Function | File | Status | Evidence |
 | --- | --- | --- | --- |
 | `dbl` | src/lib.mjs | ✅ proven | test/t.test.mjs:3 'sound' went red when gutted |
@@ -10,4 +12,4 @@
 ✓ 1 test verified: gutted the function, the test went red.
 
 ---
-*Evidence classes: **proven/hollow** are execution-backed (we mutated the function and reran its test). **unverifiable/untested** are name-search (a same-named function elsewhere can confuse them). Only value-pinning tests with locatable functions are probeable — skipped tests are counted in the default report and `--json` output.*
+*Evidence classes: **proven/hollow** are execution-backed (we mutated the function and reran its test). **unverifiable/untested** are name-search (a same-named function elsewhere can confuse them). Only value-pinning tests with locatable functions are probeable — the per-reason skip breakdown is in the default report and `--json` output.*

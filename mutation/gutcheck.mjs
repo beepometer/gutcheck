@@ -170,6 +170,11 @@ export function formatMarkdown(r) {
   const notProbedPart = (cs.notProbed || 0) > 0 ? ` · not probed (cap) ${cs.notProbed}` : '';
   lines.push(`**${cs.fns} function${cs.fns === 1 ? '' : 's'} changed** · proven ${cs.proven} · hollow ${cs.hollow} · unverifiable ${cs.unverifiable} · untested ${cs.untested}${notProbedPart}`);
   lines.push('');
+  // Probe mechanics on the CI surface (field feedback): a reader deciding how much to trust the gate
+  // as coverage needs the mutation/survivor counts and the skipped total HERE, not only in --json —
+  // an area that is mostly unverifiable must be visible at a glance.
+  lines.push(`*probed ${r.probes} fn${r.probes === 1 ? '' : 's'} · ${r.caught}/${r.scored} bound · ${(r.skipped || []).length} test${(r.skipped || []).length === 1 ? '' : 's'} skipped · runner ${r.runner}*`);
+  lines.push('');
   lines.push('| Function | File | Status | Evidence |');
   lines.push('| --- | --- | --- | --- |');
   for (const c of r.changes) lines.push(`| \`${c.fn}\` | ${c.file} | ${statusMd(c)} | ${evidenceMd(c)} |`);
@@ -227,7 +232,7 @@ export function formatMarkdown(r) {
   }
   lines.push('');
   lines.push('---');
-  lines.push('*Evidence classes: **proven/hollow** are execution-backed (we mutated the function and reran its test). **unverifiable/untested** are name-search (a same-named function elsewhere can confuse them). Only value-pinning tests with locatable functions are probeable — skipped tests are counted in the default report and `--json` output.*');
+  lines.push('*Evidence classes: **proven/hollow** are execution-backed (we mutated the function and reran its test). **unverifiable/untested** are name-search (a same-named function elsewhere can confuse them). Only value-pinning tests with locatable functions are probeable — the per-reason skip breakdown is in the default report and `--json` output.*');
   return lines.join('\n');
 }
 
