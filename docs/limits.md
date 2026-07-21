@@ -55,6 +55,11 @@ means the test detects the positive sentinel's direction of error — weaker evi
 `proven` on an equality pin. `--deep` buys evidence quality, not coverage: it re-probes the same
 tests with more mutants (roughly double the runs) and cannot make more of the suite probeable.
 
+Relational assertions (`a > b` and friends) are probed asymmetrically: a mutant that goes red proves
+the test binds, but a mutant that survives both extreme sentinels reports `relation-unbound` instead
+of hollow — a one-sided relation like `assertTrue(score >= 0)` passes extreme sentinels by
+construction, so its survival is not evidence the test is hollow.
+
 The hollow catch is the rare, high-severity case. The everyday output is the denominator: which of
 the functions you just changed have no binding test at all.
 

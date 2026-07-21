@@ -346,11 +346,32 @@ export function testCmdFor(runner, file, name, dir = process.cwd(), qualified = 
     gradleTask = { taskPath: 'test', cleanPath: 'cleanTest', resultsDir: 'build/test-results/test' }) {
   if (runner === 'gradle') {
     // java -cp <wrapper.jar> org.gradle.wrapper.GradleWrapperMain <cleanTask> <task> --tests <FQN>
-    //   --offline --console=plain  — no gradlew script (win32 .bat EINVAL-safe); cleanTask forces rerun
-    //   (Gradle's up-to-date test-skip is real); --tests takes the class-qualified FQN literally.
+    //   --offline --console=plain -Dorg.gradle.vfs.watch=false — no gradlew script (win32 .bat
+    //   EINVAL-safe); cleanTask forces rerun (Gradle's up-to-date test-skip is real); --tests takes the
+    //   class-qualified FQN literally. -Dorg.gradle.vfs.watch=false kills the vfs-watch race at its
+    //   source (field report 2026-07-18): the probe's out-of-band mutant write can be missed by the
+    //   daemon's virtual filesystem watcher, so a main-source compile task goes UP-TO-DATE despite
+    //   changed source and the test reruns against STALE classes — a fresh-green survivor read off a
+    //   build that never saw the mutant. System-property form deliberately, not `--no-watch-fs`: an
+    //   unrecognized -D property is silently ignored by a Gradle version that predates it, while
+    //   `--no-watch-fs` is a hard CLI parse error on Gradle < 6.7 — see mainCompileExecuted below for the
+    //   belt-and-suspenders evidence gate that catches the race even where this flag can't (an old
+    //   Gradle that ignores it).
+    // NO --build-cache (removed, same field report): it made the race's failure mode WORSE, not better.
+    // The local build cache is content-addressable and LOCATION-independent by design — that's its whole
+    // point — so it satisfies a task from ANY prior build of byte-identical content, including a totally
+    // separate probe invocation against a different temp work copy (e.g. the Stop hook re-firing on an
+    // unchanged diff, or a user re-running gutcheck). A within-one-run repeat gut of the same fn (two
+    // test blocks covering it) is still fast via Gradle's own always-on incremental build and is proven
+    // safe by the lastCompiled memo below (this run watched it compile); --build-cache's only
+    // ADDITIONAL effect was reusing output ACROSS separate invocations, which mainCompileExecuted cannot
+    // tell apart from the race (both look identically UP-TO-DATE/FROM-CACHE) — so keeping it enabled
+    // would silently mask real hollow findings on any repeat run. A live 2-invocation repro (probe the
+    // same uncommitted diff twice) confirmed this: with --build-cache, the second invocation's genuine
+    // survivors all read back 'ungutable' instead of their real verdict.
     const wrapper = join(dir, 'gradle', 'wrapper', 'gradle-wrapper.jar');
     return { cmd: javaExe() || 'java', args: ['-cp', wrapper, 'org.gradle.wrapper.GradleWrapperMain',
-      gradleTask.cleanPath, gradleTask.taskPath, '--tests', name, '--offline', '--console=plain'] };
+      gradleTask.cleanPath, gradleTask.taskPath, '--tests', name, '--offline', '--console=plain', '-Dorg.gradle.vfs.watch=false'] };
   }
   if (runner === 'maven') {
     // mvn -o test -Dtest=<Class>#<method> -Dsurefire.failIfNoSpecifiedTests=false  — offline (mirrors
@@ -380,7 +401,13 @@ export function testCmdFor(runner, file, name, dir = process.cwd(), qualified = 
     return isWin32 ? fb : { cmd: fb.cmd, args: [...fb.args, ...runnerArgs] };
   }
   if (runner === 'pytest') return { cmd: pythonExe() || 'python', args: ['-m', 'pytest', file, '-k', name, '-q'] };
-  return { cmd: 'node', args: ['--test', '--test-name-pattern', '^' + reEsc(name) + '$', file] };
+  // --test-reporter=tap is MANDATORY, not cosmetic: Node >=23 flipped the default `node --test` reporter
+  // tap->spec (even for non-TTY stdout). The spec reporter prints `ℹ pass 1`, which parseRun and
+  // nodeEffectiveCounts (TAP-only: `# pass N`, `1..0`, `ok N - <file>`) cannot read, so every node-runner
+  // verdict parses 0p/0f — the self-check's planted sound test is never caught and gutcheck refuses to run
+  // (issue #4). `--test-reporter` exists on every Node this package supports (>=20), so pin it
+  // unconditionally — the node analog of mocha's `--reporter tap` / ava's `--tap` above.
+  return { cmd: 'node', args: ['--test', '--test-reporter=tap', '--test-name-pattern', '^' + reEsc(name) + '$', file] };
 }
 // {passed, failed} from the runner SUMMARY — never the exit code (a zero-match run is green).
 // parseRun always receives stdout+stderr CONCATENATED IN THAT ORDER (runOne), and these regexes are
@@ -447,6 +474,65 @@ export function parseGradleResults(dir) {
   }
   return { passed: tests - skipped - failures - errors, failed: failures + errors };
 }
+// Field report 2026-07-18 (false-positive hollow, AcoustiQ): `compiled === false` and an empty {0,0}
+// result are both already gated (see the callers below), but a THIRD shape leaked one past them — a
+// gradle daemon vfs-watch race can miss the probe's out-of-band mutant write, so the main-source compile
+// task goes UP-TO-DATE despite changed source, the test reruns against STALE (unmutated) classes, and
+// the resulting fresh-green XML reads as a genuine survivor. A mutant edit changes MAIN source, so a
+// valid mutant run can never leave every main-source compile task labeled (UP-TO-DATE/FROM-CACHE/
+// NO-SOURCE/SKIPPED) — that combination proves the daemon built stale sources: the green result is void,
+// and treating it as a survivor mints a false hollow. Test-source compile tasks (Gradle's own
+// `compileTestKotlin`/`compileTestJava`, AGP's `compileDebugUnitTestKotlin`/`compileDebugAndroidTestKotlin`)
+// legitimately stay labeled on every mutant run (the mutant never touches test sources) — excluded by a
+// broad `Test` substring match (covers both naming conventions; a false EXCLUDE only makes this gate
+// MORE conservative, never less, since excluding a real candidate just costs reach, never precision).
+// The substring check is scoped to the TASK-NAME segment only (after the LAST `:`), never the full
+// module-qualified path — a module literally named `integration-test`/`apptest`/`test` (real, reviewer-
+// verified shapes) would otherwise have its OWN main compile task (`:integration-test:compileKotlin`)
+// wrongly excluded by "test" appearing in the MODULE name, downgrading a genuine hollow in that module to
+// ungutable — reach lost for a false reason, never a precision gain.
+// Gradle's plain console prints one line per task: `> Task :app:compileDebugKotlin` — BARE, meaning the
+// task actually EXECUTED just now — or `> Task :app:compileDebugKotlin UP-TO-DATE` (also FROM-CACHE/
+// NO-SOURCE/SKIPPED) — LABELED, meaning gradle reused a prior outcome. Only a bare non-test compile line
+// counts as fresh evidence the compiler saw the CURRENT (mutated) bytes; multi-module runs are satisfied
+// by the mutated module alone (an unmutated sibling staying UP-TO-DATE is correct and must not veto).
+export function mainCompileExecuted(out) {
+  for (const m of out.matchAll(/^> Task :(\S*)(?:\s+(\S+))?\s*$/gm)) {
+    const path = m[1]; const label = m[2] || '';
+    const taskName = path.slice(path.lastIndexOf(':') + 1); // segment after the LAST colon — module path segments (however "test"-shaped) must never feed the checks below
+    if (!/compile\w*(Kotlin|Java)/i.test(taskName)) continue;
+    if (/test/i.test(taskName)) continue;
+    if (label === '') return true; // bare line = executed just now
+  }
+  return false;
+}
+// The gradle-only stale-build veto decision (field report 2026-07-18), extracted into its own pure
+// function so it can be unit-tested without a live gradle spawn (mirrors mainCompileExecuted/mavenCompiled
+// above). `r` is a runOne-shaped result ({passed, failed, out}); `sutRel` + `content` identify WHICH
+// mutant is under evidence; `lastCompiled` is a Map, one entry per sut file, of the last mutant content
+// this run itself watched compile fresh (see its own header comment at the prove() declaration site for
+// why "last", not "ever"). The recording (mainCompileExecuted -> lastCompiled.set) happens FIRST and
+// UNCONDITIONALLY on every genuinely fresh compile, red or green — a real caught result (e.g.
+// testScoreBound gutting `score`) is just as valid a "this run built this exact content" receipt as a
+// survivor is, and a LATER block gutting the SAME fn with the SAME sentinel (e.g. testScoreOneSided,
+// deterministically identical bytes) must be able to recognize that reuse even though its own compile
+// task reads UP-TO-DATE. Short-circuiting recording on the red path was a real regression caught by the
+// live jvm-e2e relational-one-sided-tier suite during development — recording must never depend on the
+// pass/fail branch below. Contract: a RED result (r.failed > 0) is always valid — a stale build can only
+// reuse already-passing original code, so it can only ever fake a GREEN, never a false red. A result that
+// isn't a survivor at all (passed === 0 too — a 0/0 non-run) is likewise never this function's concern
+// (every caller only reaches it once a survivor is already established) and reads as valid so a caller
+// applying it unconditionally can't misfire. A GREEN (passed > 0) result is valid exactly when either the
+// compile task actually executed (mainCompileExecuted) or `lastCompiled` already shows this EXACT content
+// as the last thing this run verified compiling for this file (Gradle correctly, non-racily, reusing its
+// own recent work — possibly recorded by a RED block moments ago). Anything else — labeled, and not
+// matching the last verified content — is exactly the field report's shape: void.
+export function survivorEvidenceValid(r, sutRel, content, lastCompiled) {
+  const executed = mainCompileExecuted(r.out);
+  if (executed) lastCompiled.set(sutRel, content);
+  if (r.failed > 0 || r.passed === 0) return true;
+  return executed || lastCompiled.get(sutRel) === content;
+}
 // Maven's compile-fail signal, DISTINCT from a failing test — verified live on both real shapes (see
 // test/fixtures/runner-output/maven-{compile,test}-fail.txt): a non-compiling mutant prints "[ERROR]
 // COMPILATION ERROR :" (and never reaches surefire, so no fresh XML exists — parseGradleResults reads
@@ -507,6 +593,17 @@ export function runOne(cwd, runner, file, name, timeoutMs, qualified = false) {
 
 // ---- block parsing (JS/TS it()/test(), and pytest def test_*) ----
 function balancedFrom(s, openParen) { let d = 0, k = openParen; for (; k < s.length; k++) { const c = s[k]; if (c === '(') d++; else if (c === ')') { d--; if (!d) { k++; break; } } } return { arg: s.slice(openParen + 1, k - 1), end: k }; }
+// `{`-balanced analog of balancedFrom: the text inside the brace pair opening at body[idx], or null
+// when unbalanced. Callers pass MASKED text (codeOnly), so brace characters inside strings — including
+// Kotlin string templates — are already blanked and cannot desynchronize the depth count.
+export function braceArgFrom(body, idx) {
+  let depth = 0;
+  for (let i = idx; i < body.length; i++) {
+    if (body[i] === '{') depth++;
+    else if (body[i] === '}') { depth--; if (depth === 0) return body.slice(idx + 1, i); }
+  }
+  return null;
+}
 // The receiver expression immediately preceding `end` (the index of the '.' before `should`): an identifier /
 // member chain, with balanced call/index groups consumed backward. Returns '' if none.
 function receiverBefore(body, end) {
@@ -955,12 +1052,25 @@ const JVM_VALUE_ASSERT_RE = /\b(?:assertEquals|assertSame|assertArrayEquals|asse
 // matcher — a bare assertThat(x) with only a weak follow-on (.isNotNull(), .isNotEmpty(), …) is not a
 // pin (mirrors the JS weak-matcher exclusion below: no assertion strength ⇒ never probed).
 const ASSERTJ_SOUND = /^\s*\.\s*(?:isEqualTo|isSameAs|containsExactly|containsExactlyInAnyOrder|isEqualToComparingFieldByField)\s*\(/;
-export function pinnedFragments(body, imports = new Map(), lang) {
+// AssertJ directional (relational) matchers — same asymmetry as RELATIONAL_PIN_CALL/CHAI_REL above: a
+// relational pin can PROVE but never CONVICT (see the verdict fold).
+const ASSERTJ_REL = /^\s*\.\s*(?:isGreaterThanOrEqualTo|isGreaterThan|isLessThanOrEqualTo|isLessThan)\s*\(/;
+// Relational (direction-only) matcher vocabulary — spec Feature 2 §1. A relational pin can PROVE
+// (mutant red) but can never CONVICT (survive → relation-unbound, never hollow) — see the verdict
+// fold. That asymmetry is what makes loose admission safe: a false-relational match can only add
+// proven/one-sided/relation-unbound, never an accusation.
+const RELATIONAL_PIN_CALL = /^\s*\.\s*(?:toBeGreaterThanOrEqual|toBeGreaterThan|toBeLessThanOrEqual|toBeLessThan)\s*\(/;
+// chai chains: same language-chain shape as CHAI_PIN, plus `at` (needed for .to.be.at.least/.at.most —
+// `at` is a chai no-op chain that the value vocabulary never needed).
+const CHAI_REL = /^\s*\.\s*(?:to|should)\s*\.\s*(?:(?:be|been|is|that|which|and|has|deep|same|an|a|at)\s*\.\s*)*(?:above|gt|greaterThan|least|gte|below|lt|lessThan|most|lte)\s*\(/;
+const SHOULD_REL = /^\.\s*should\s*\.\s*(?:(?:be|been|is|that|which|and|has|deep|same|an|a|at)\s*\.\s*)*(?:above|gt|greaterThan|least|gte|below|lt|lessThan|most|lte)\s*\(/;
+export function pinnedFragmentsByKind(body, imports = new Map(), lang) {
   const jvm = lang === 'kotlin' || lang === 'java';
   body = codeOnly(body, jvm ? lang : 'typescript'); // mask strings/comments FIRST — a code sample embedded in a string
   // (or a commented-out assertion) must never be seen by the scans below (no false HOLLOW). Idempotent on
   // already-masked input, so re-masking here is harmless when eligibleFns has already masked its copy.
-  const frags = [];
+  const value = []; const relational = [];
+  const frags = value; // existing scan code below keeps pushing to `frags` unchanged
   for (const m of body.matchAll(/expect\s*\(/g)) {
     const { arg, end } = balancedFrom(body, m.index + m[0].length - 1);
     let after = body.slice(end);
@@ -974,11 +1084,20 @@ export function pinnedFragments(body, imports = new Map(), lang) {
       frags.push(arg);
       const mm = VALUE_PIN_CALL.exec(after);
       if (mm) frags.push(balancedFrom(after, mm.index + mm[0].length - 1).arg);
+    } else if (RELATIONAL_PIN_CALL.test(after) || (!pm && CHAI_REL.test(after))) {
+      relational.push(arg);
+      const rm = RELATIONAL_PIN_CALL.exec(after) || CHAI_REL.exec(after);
+      relational.push(balancedFrom(after, rm[0].length - 1).arg); // matcher arg — the other side of the relation
     }
   }
-  for (const m of body.matchAll(/\bassert(?:\.(?:strictEqual|deepStrictEqual|deepEqual|equal))?\s*\(/g)) {
-    if (/\bassert\s*\($/.test(m[0])) continue; // bare assert(...) is a truthiness check, not value-pinning
-    frags.push(balancedFrom(body, m.index + m[0].length - 1).arg);
+  for (const m of body.matchAll(/\bassert(?:\.(?:strictEqual|deepStrictEqual|deepEqual|equal|ok))?\s*\(/g)) {
+    const { arg } = balancedFrom(body, m.index + m[0].length - 1);
+    if (/\bassert\s*\($/.test(m[0]) || /\.\s*ok\s*\($/.test(m[0])) {
+      const sides = topLevelComparisonSides(arg);
+      if (sides) { relational.push(sides[0]); relational.push(sides[1]); }
+      continue; // plain truthiness (no top-level comparator) stays excluded, exactly as before
+    }
+    frags.push(arg);
   }
   // aliased/destructured assert (import-aware): names bound to node:assert.
   const bound = new Set(); for (const [name, spec] of imports) if (ASSERT_SPECS.has(spec)) bound.add(name);
@@ -1006,7 +1125,17 @@ export function pinnedFragments(body, imports = new Map(), lang) {
     const recv = receiverBefore(body, m.index);
     if (recv) frags.push(recv);
   }
+  // chai `should` relational chain: <receiver>.should.be.<relational-form> — mirrors SHOULD_SOUND above.
+  for (const m of body.matchAll(/\.\s*should\s*\./g)) {
+    if (!SHOULD_REL.test(body.slice(m.index))) continue;
+    if (SHOULD_SOUND.test(body.slice(m.index))) continue; // value already claimed it
+    const recv = receiverBefore(body, m.index);
+    if (recv) relational.push(recv);
+  }
   for (const m of body.matchAll(/\bassert\s+(.+?)\s*===?\s*(.+?)(?:$|\n)/gm)) { frags.push(m[1]); frags.push(m[2]); } // pytest / chai assert a == b
+  // pytest bare relational assert (spec §1): both sides pushed, chained comparisons allowed —
+  // asymmetric verdicting protects every relation, so a chain needs no special casing.
+  for (const m of body.matchAll(/\bassert\s+([^\n]+?)\s+(?:>=|<=|>|<)\s+([^\n]+?)(?:$|\n)/gm)) { relational.push(m[1]); relational.push(m[2]); }
   if (jvm) {
     // assertEquals(expected, actual) / assertSame / assertArrayEquals / assertContentEquals — JUnit puts
     // the SUT call in EITHER position (expected first is the JUnit convention, but a caller can and does
@@ -1021,8 +1150,28 @@ export function pinnedFragments(body, imports = new Map(), lang) {
       const { arg, end } = balancedFrom(body, m.index + m[0].length - 1);
       if (ASSERTJ_SOUND.test(body.slice(end))) frags.push(arg);
     }
+    // Relational JVM forms (spec §1): assertTrue/assertFalse over one top-level comparison — paren and
+    // Kotlin trailing-lambda call shapes — and AssertJ's directional matchers. Both relation sides pushed.
+    for (const m of body.matchAll(/\bassert(?:True|False)\s*\(/g)) {
+      const sides = topLevelComparisonSides(balancedFrom(body, m.index + m[0].length - 1).arg);
+      if (sides) { relational.push(sides[0]); relational.push(sides[1]); }
+    }
+    if (lang === 'kotlin') for (const m of body.matchAll(/\bassert(?:True|False)\s*\{/g)) {
+      const inner = braceArgFrom(body, m.index + m[0].length - 1);
+      const sides = inner === null ? null : topLevelComparisonSides(inner);
+      if (sides) { relational.push(sides[0]); relational.push(sides[1]); }
+    }
+    for (const m of body.matchAll(/\bassertThat\s*\(/g)) {
+      const { arg, end } = balancedFrom(body, m.index + m[0].length - 1);
+      const rm = ASSERTJ_REL.exec(body.slice(end));
+      if (rm) { relational.push(arg); relational.push(balancedFrom(body.slice(end), rm[0].length - 1).arg); }
+    }
   }
-  return frags;
+  return { value, relational };
+}
+export function pinnedFragments(body, imports = new Map(), lang) {
+  const k = pinnedFragmentsByKind(body, imports, lang);
+  return [...k.value, ...k.relational];
 }
 // Callee names whose '(' is at bracket-depth 0 (not nested inside another call's args / an array / object).
 export function topLevelCallees(expr) {
@@ -1067,6 +1216,62 @@ export function kotlinLeadingCall(expr) {
   const m = /^\s*([a-z_]\w*)\s*(?:<[^>]*>\s*)?[({]/.exec(expr);
   return m ? m[1] : null;
 }
+// The receiver'd HEAD call of a Kotlin expression (field report #3): `Receiver.method(` at the very head,
+// where Receiver is an Uppercase-initial name present in the test file's import map (a resolvable
+// object/companion/class singleton — never a local/param/mock var). This is the DOMINANT Kotlin test
+// idiom (`val x = Modes.speedOfSound(...)`) that kotlinLeadingCall deliberately excludes (its own head
+// requires a lowercase-initial name). Same two fail-closed guards as kotlinLeadingCall, both load-bearing:
+//   - Import gate (`imports.has(m[1])`): the receiver must be a name the test file actually imports — a
+//     mock (`mockk()`, a local var, `repo.find(id)`) is lowercase and fails the regex outright; a same-
+//     package type reached with NO import line for it also fails this gate (deliberate under-reach — the
+//     import gate IS the moat here, exactly like resolveJvmSut's own package-reachability gate). The
+//     honest guarantee is STRICTLY-MORE-GATED-THAN-THE-INLINE-PATH, not impossibility: an uppercase local
+//     val shadowing an import, or `mockkObject(Modes)` stubbing an imported object, satisfies the gate —
+//     the same shapes the already-shipped inline capitalized-receiver path credits with NO import gate
+//     at all, so this path narrows that pre-existing surface rather than adding to it.
+//   - Head anchor (`^\s*`): the call must be the WHOLE expression's head, so a dead/short-circuited branch
+//     (`cond ?: Foo.bar()`, `if (c) Foo.a() else Foo.b()`) can never match — the head token there is
+//     `cond`/`if`, not an Uppercase receiver, so the regex fails at position 0 with no retry.
+// Chained/nested receivers are a single hop by construction, not a special case: `A.b().c(...)` matches
+// only `A.b(` (group 2 = `b`) — `c` is never captured at all, so it can never be credited via this path
+// regardless of candidateFns (evaluated-surface decision: chained receivers are out of scope). A
+// companion/nested-object receiver (`Outer.Inner.method(...)`) falls through with no credit: the second
+// group requires a LOWERCASE-initial token right after the first dot, and `Inner` is Uppercase, so the
+// whole `^`-anchored match fails outright (safe under-reach, not a special-cased guard).
+// Kotlin-gated only (mirrors the pre-existing val-hop it extends): the Java analogue was evaluated and
+// deliberately left out of scope this pass — see importMap's `lang === 'kotlin'` gate below, which is
+// the reason a Java `var x = Modes.speedOfSound(...)` never has `Modes` in its import map at all.
+// Returns `method`, or null.
+export function kotlinReceiverCall(expr, imports) {
+  const m = /^\s*([A-Z]\w*)\s*\.\s*([a-z_]\w*)\s*(?:<[^>]*>\s*)?\(/.exec(expr);
+  if (!m) return null;
+  if (!imports.has(m[1])) return null; // receiver must be imported (object/type), not a local/mock/unimported type
+  return m[2];
+}
+// Split `text` at its single top-level comparison operator (>, <, >=, <=) → [lhs, rhs], else null.
+// Depth-0 only (parens/brackets/braces balanced); refuses && and || (a joined condition is not one
+// relation — fail-closed per spec), ==/===/!= (never relational), a second comparator, arrows
+// (=>, ->), and shifts (<< >>). Runs on MASKED text, so string contents never reach it. Generic-type
+// false positives (f<T>(x)) are accepted: admission is verdict-safe by construction (see above).
+export function topLevelComparisonSides(text) {
+  let depth = 0, cmp = -1, op = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (depth === 0) {
+      if ((c === '&' && text[i + 1] === '&') || (c === '|' && text[i + 1] === '|')) return null;
+      if ((c === '=' && text[i + 1] === '=') || (c === '!' && text[i + 1] === '=')) return null;
+      if (c === '<' || c === '>') {
+        if (text[i - 1] === '=' || text[i - 1] === '-') continue; // => and -> arrows
+        if (text[i + 1] === c) { i++; continue; }                  // << >> shifts
+        if (cmp !== -1) return null;                               // a second comparator — refuse
+        cmp = i; op = text[i + 1] === '=' ? c + '=' : c;
+      }
+    }
+  }
+  return cmp === -1 ? null : [text.slice(0, cmp).trim(), text.slice(cmp + op.length).trim()];
+}
 // Back-compat single-value form — every reach/eligibility consumer that only needs the linked names.
 export function eligibleFns(body, candidateFns, imports = new Map(), lang) {
   return eligibleFnsDetail(body, candidateFns, imports, lang).eligible;
@@ -1078,67 +1283,92 @@ export function eligibleFns(body, candidateFns, imports = new Map(), lang) {
 // (public issue #3 — the false claim sends users to "fix" sound tests).
 export function eligibleFnsDetail(body, candidateFns, imports = new Map(), lang) {
   const codeLang = (lang === 'kotlin' || lang === 'java') ? lang : 'typescript';
-  const masked = codeOnly(body, codeLang); // mask once; reused for both scans below (pinnedFragments
+  const masked = codeOnly(body, codeLang); // mask once; reused for both scans below (pinnedFragmentsByKind
   // re-masks its input too — codeOnly is idempotent on already-masked text — so each stays independently safe).
-  const frags = pinnedFragments(masked, imports, lang);
-  if (!frags.length) return { eligible: [], hadPin: false };
-  const fragText = frags.join(' ; ');
-  const calls = (txt, fn) => new RegExp('\\b' + reEsc(fn) + '\\s*\\(').test(txt);
-  const eligible = new Set(candidateFns.filter((fn) => calls(fragText, fn)));
-  // one variable hop: a bare var pinned by a matcher, assigned from a SUT call. Strictly SAME-LINE
-  // (`[^\S\n]*` around `=`, not `\s*`): a `\s` matches the newline, so a var whose RHS masks to whitespace
-  // (`let g = "hi"` → the string blanks to spaces) would let `[^\n;]+` reach onto the NEXT statement and
-  // credit its callee to `g` → a false HOLLOW when g is set independently and that callee is gutted. A
-  // blank-masked RHS now matches nothing (no callee) — a correct under-reach. And skip a RHS with a top-level
-  // short-circuit / conditional (`hasTopLevelShortCircuit`): an embedded callee (`provided || defaultPort()`)
-  // may sit on a dead branch → gutting it leaves a SOUND test green → a false HOLLOW. (Both were pre-existing
-  // vectors in this shared JS/py hop; fixed here — a non-short-circuit `+` still credits both callees.)
-  const bareVars = new Set(); for (const f of frags) for (const v of f.matchAll(/(?<![.\w$])([A-Za-z_$]\w*)\b/g)) bareVars.add(v[1]);
-  // PRECISION (composite TS type annotations, owner-authorised fix): the annotation-skip group must be
-  // ARROW-AWARE — `(?:=>|[^=\n])+?` consumes a `=>` token as one atomic unit, instead of the plain
-  // `[^=\n]+?`, which lazily stops at the FIRST literal `=` it sees. A function-type member inside a
-  // composite annotation contains `=>`, and `=>` itself CONTAINS a bare `=` character — so the old group
-  // truncated mid-type (`{ cb: (x: number) => number, compute(): number } = { cb: identity }` stopped right
-  // after the arrow's `=`), and the REST of the type (`compute(): number`, method-signature-shaped text)
-  // spilled into the RHS text scanned below for calls → a false credit for a fn never actually called. The
-  // group is arrow-aware but deliberately NOT brace-aware (it does not track `{}`/`<>` nesting) — that is
-  // sufficient because (a) a quoted string-literal type (`'a=b'`-shaped) is already blanked by codeOnly's
-  // masking before this regex ever runs, so a literal `=` hiding in a string can't false-stop the scan, and
-  // (b) stopping at the first bare `=` that isn't part of `=>` is exactly the real assignment operator for
-  // any realistic annotation — a genuine SECOND bare `=` inside the type is not a shape TS/Kotlin produce.
-  // The REQUIRED assignment separator right after the group also needs `(?!>)`: the group is lazy/optional,
-  // so it stops at the FIRST position the trailing pattern accepts — without `(?!>)` that trailing pattern
-  // still accepts an arrow's `=` (it doesn't know the group is "supposed" to be arrow-aware), so the group
-  // would stop one char too early regardless of what it can consume. `(?!>)` forces it past the arrow.
-  // Mirrored at the Kotlin val/var hop and the jsInstanceSuts copy below (both reference this comment).
-  for (const m of masked.matchAll(/(?:const|let|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
-    if (!bareVars.has(m[1])) continue;
-    if (hasTopLevelShortCircuit(m[2])) continue;
-    const outer = topLevelCallees(m[2]);
-    for (const fn of candidateFns) if (outer.includes(fn)) eligible.add(fn);
-  }
-  // Kotlin val-hop: the hop above matches `const|let|var` with a paren-ONLY callee scan, so a Kotlin `val`
-  // binding — the dominant idiom — and a parenless trailing-lambda RHS (`val r = yaml { … }`) both fall
-  // through. Mirror it for `val`/`var`. Kotlin-only: JS/py/Java never enter here (byte-identical). Same var-hop
-  // safety plus the same two precision guards as the shared hop (same-line + no dead-branch credit), but via
-  // kotlinLeadingCall (the RHS-HEAD call whose result IS the var's value): unlike the JS hop's short-circuit
-  // scan, this ALSO excludes a Kotlin `if`/`when` EXPRESSION RHS (`val x = if (c) a() else b()` → the head is
-  // the `if` keyword, never a candidate) — a conditional form JS lacks. The credited name is still gated by
-  // sutFnsIn (scope/control-flow excluded) and the import/package-gated, overload-fail-closed resolver.
-  if (lang === 'kotlin') {
-    // Arrow-aware annotation-skip group — same fix, same reasoning, as the const/let/var hop above.
-    for (const m of masked.matchAll(/\b(?:val|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
+  const byKind = pinnedFragmentsByKind(masked, imports, lang);
+  if (!byKind.value.length && !byKind.relational.length) return { eligible: [], relationalOnly: [], hadPin: false, hadValuePin: false };
+  // Per-kind crediting (relational-assert reach, Feature 2 §1): the crediting body below is run ONCE PER
+  // KIND (value fragments, then relational fragments) — byte-identical logic each time, just reading a
+  // different fragment list. A fn linked only through the relational scan is provable (mutant red) but
+  // must never CONVICT (survive → hollow) — the verdict fold reads relationalOnly to enforce that asymmetry.
+  const creditFrom = (frags) => {
+    if (!frags.length) return new Set();
+    const fragText = frags.join(' ; ');
+    const calls = (txt, fn) => new RegExp('\\b' + reEsc(fn) + '\\s*\\(').test(txt);
+    const eligible = new Set(candidateFns.filter((fn) => calls(fragText, fn)));
+    // one variable hop: a bare var pinned by a matcher, assigned from a SUT call. Strictly SAME-LINE
+    // (`[^\S\n]*` around `=`, not `\s*`): a `\s` matches the newline, so a var whose RHS masks to whitespace
+    // (`let g = "hi"` → the string blanks to spaces) would let `[^\n;]+` reach onto the NEXT statement and
+    // credit its callee to `g` → a false HOLLOW when g is set independently and that callee is gutted. A
+    // blank-masked RHS now matches nothing (no callee) — a correct under-reach. And skip a RHS with a top-level
+    // short-circuit / conditional (`hasTopLevelShortCircuit`): an embedded callee (`provided || defaultPort()`)
+    // may sit on a dead branch → gutting it leaves a SOUND test green → a false HOLLOW. (Both were pre-existing
+    // vectors in this shared JS/py hop; fixed here — a non-short-circuit `+` still credits both callees.)
+    const bareVars = new Set(); for (const f of frags) for (const v of f.matchAll(/(?<![.\w$])([A-Za-z_$]\w*)\b/g)) bareVars.add(v[1]);
+    // PRECISION (composite TS type annotations, owner-authorised fix): the annotation-skip group must be
+    // ARROW-AWARE — `(?:=>|[^=\n])+?` consumes a `=>` token as one atomic unit, instead of the plain
+    // `[^=\n]+?`, which lazily stops at the FIRST literal `=` it sees. A function-type member inside a
+    // composite annotation contains `=>`, and `=>` itself CONTAINS a bare `=` character — so the old group
+    // truncated mid-type (`{ cb: (x: number) => number, compute(): number } = { cb: identity }` stopped right
+    // after the arrow's `=`), and the REST of the type (`compute(): number`, method-signature-shaped text)
+    // spilled into the RHS text scanned below for calls → a false credit for a fn never actually called. The
+    // group is arrow-aware but deliberately NOT brace-aware (it does not track `{}`/`<>` nesting) — that is
+    // sufficient because (a) a quoted string-literal type (`'a=b'`-shaped) is already blanked by codeOnly's
+    // masking before this regex ever runs, so a literal `=` hiding in a string can't false-stop the scan, and
+    // (b) stopping at the first bare `=` that isn't part of `=>` is exactly the real assignment operator for
+    // any realistic annotation — a genuine SECOND bare `=` inside the type is not a shape TS/Kotlin produce.
+    // The REQUIRED assignment separator right after the group also needs `(?!>)`: the group is lazy/optional,
+    // so it stops at the FIRST position the trailing pattern accepts — without `(?!>)` that trailing pattern
+    // still accepts an arrow's `=` (it doesn't know the group is "supposed" to be arrow-aware), so the group
+    // would stop one char too early regardless of what it can consume. `(?!>)` forces it past the arrow.
+    // Mirrored at the Kotlin val/var hop and the jsInstanceSuts copy below (both reference this comment).
+    for (const m of masked.matchAll(/(?:const|let|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
       if (!bareVars.has(m[1])) continue;
-      const lead = kotlinLeadingCall(m[2]);
-      if (lead && candidateFns.includes(lead)) eligible.add(lead);
+      if (hasTopLevelShortCircuit(m[2])) continue;
+      const outer = topLevelCallees(m[2]);
+      for (const fn of candidateFns) if (outer.includes(fn)) eligible.add(fn);
     }
-  }
-  return { eligible: [...eligible], hadPin: true };
+    // Kotlin val-hop: the hop above matches `const|let|var` with a paren-ONLY callee scan, so a Kotlin `val`
+    // binding — the dominant idiom — and a parenless trailing-lambda RHS (`val r = yaml { … }`) both fall
+    // through. Mirror it for `val`/`var`. Kotlin-only: JS/py/Java never enter here (byte-identical). Same var-hop
+    // safety plus the same two precision guards as the shared hop (same-line + no dead-branch credit), but via
+    // kotlinLeadingCall (the RHS-HEAD call whose result IS the var's value): unlike the JS hop's short-circuit
+    // scan, this ALSO excludes a Kotlin `if`/`when` EXPRESSION RHS (`val x = if (c) a() else b()` → the head is
+    // the `if` keyword, never a candidate) — a conditional form JS lacks. The credited name is still gated by
+    // sutFnsIn (scope/control-flow excluded) and the import/package-gated, overload-fail-closed resolver.
+    if (lang === 'kotlin') {
+      // Arrow-aware annotation-skip group — same fix, same reasoning, as the const/let/var hop above.
+      for (const m of masked.matchAll(/\b(?:val|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
+        if (!bareVars.has(m[1])) continue;
+        const lead = kotlinLeadingCall(m[2]);
+        if (lead && candidateFns.includes(lead)) eligible.add(lead);
+        // Receiver'd object/singleton call (field report #3): `val x = Modes.speedOfSound(...)` — the
+        // dominant idiom kotlinLeadingCall's bare-lowercase-head requirement misses. Import-gated + head-
+        // anchored (see kotlinReceiverCall) — purely ADDITIVE, never loosens what kotlinLeadingCall itself
+        // credits, and runs on the SAME masked match so it inherits the same-line + non-conditional guards.
+        const recv = kotlinReceiverCall(m[2], imports);
+        if (recv && candidateFns.includes(recv)) eligible.add(recv);
+      }
+    }
+    return eligible;
+  };
+  const valueCredit = creditFrom(byKind.value);
+  const relCredit = creditFrom(byKind.relational);
+  const relationalOnly = [...relCredit].filter((f) => !valueCredit.has(f));
+  return {
+    eligible: [...valueCredit, ...relationalOnly],
+    relationalOnly,
+    hadPin: true,
+    hadValuePin: byKind.value.length > 0,
+  };
 }
 
 // ---- SUT resolution: the non-test source file that the TEST FILE actually imports a fn from ----
-// Parse a test file's import bindings → Map<localName, specifier>. ESM `import` + CJS `require`.
-export function importMap(code) {
+// Parse a test file's import bindings → Map<localName, specifier>. ESM `import` + CJS `require`, plus
+// (kotlin-gated only — see below) Kotlin's bare `import a.b.C` form. `lang` is OPTIONAL: every pre-
+// existing call site (no lang arg, JS/py) reproduces the original ESM/CJS-only regex byte-identically —
+// the Kotlin branch below is additive and only ever runs when lang === 'kotlin'.
+export function importMap(code, lang) {
   const m = new Map();
   for (const im of code.matchAll(/\bimport\s+([^;]+?)\s+from\s*['"]([^'"]+)['"]/g)) {
     const clause = im[1].trim(), spec = im[2];
@@ -1152,6 +1382,23 @@ export function importMap(code) {
     const named = /\{([^}]*)\}/.exec(lhs);
     if (named) for (const part of named[1].split(',')) { const name = part.trim().split(/\s*:\s*/).pop().trim(); if (name) m.set(name, spec); }
     else m.set(lhs, spec);
+  }
+  // Kotlin plain import (field report #3 — no `from` clause, so the ESM regex above never matches it):
+  // `import a.b.C`. Keyed on the SIMPLE (last dotted) segment — `Modes` from `import
+  // com.roomacoustics.audio.Modes` — because that is the receiver TOKEN a call site actually shows
+  // (`Modes.speedOfSound(...)`); this is the map kotlinReceiverCall's import gate reads. Kotlin-gated
+  // (Java's static-import shape has a different member/class split and was evaluated out of scope this
+  // pass — see kotlinReceiverCall's own header) so every JS/py caller (and every Java one) is unaffected.
+  // A wildcard import (`import a.b.*`) captures a trailing '.' with nothing after it — split leaves an
+  // EMPTY last segment, which the `if (last)` guard drops — so a wildcard never names a specific type as
+  // "imported" (deliberate: the import gate only credits an EXPLICITLY named receiver, same moat as the
+  // no-import-line case below it).
+  if (lang === 'kotlin') {
+    for (const im of code.matchAll(/^\s*import\s+([\w.]+)(?:\s*\.\s*\*)?/gm)) {
+      const segs = im[1].split('.');
+      const last = segs[segs.length - 1];
+      if (last) m.set(last, im[1]);
+    }
   }
   return m;
 }
@@ -1764,44 +2011,51 @@ function jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lan
   return toPosix(relative(dir, classFileAbs));
 }
 
-// jvmInstanceSuts(body, testCode, absTest, srcFiles, dir, lang) → [{fn, sutRel}], one entry per pinned
-// lowercase-receiver instance call this block makes that could be resolved SAFELY end-to-end. `body` is
-// THIS block's own source (scopes the pinned-call scan to calls this specific test actually makes);
-// `testCode` is the WHOLE test file (scopes the receiver's type inference across block-local
+// jvmInstanceSuts(body, testCode, absTest, srcFiles, dir, lang) → [{fn, sutRel, rel?}], one entry per
+// pinned lowercase-receiver instance call this block makes that could be resolved SAFELY end-to-end.
+// `body` is THIS block's own source (scopes the pinned-call scan to calls this specific test actually
+// makes); `testCode` is the WHOLE test file (scopes the receiver's type inference across block-local
 // construction AND class-field/@BeforeEach setup). Runs only for lang 'kotlin'/'java' — every other
 // caller (JS/py/no-lang) gets `[]` and this function is otherwise never reached (see prove()'s block
 // loop), so JS/TS/Python behavior stays byte-identical. Purely ADDITIVE: the caller merges this with the
 // existing bare-name eligible list, deduped by (fn, sutRel) — it never removes anything sutFnsIn/
 // resolveJvmSut already found.
+// Per-kind crediting (relational-assert reach): value fragments are scanned FIRST, relational SECOND, so
+// a (method, sutRel) pair reachable through both kinds is credited as a VALUE entry (the `seen` dedupe
+// keeps whichever kind got there first) — a relational credit can prove but never convict, so letting a
+// value credit win is the safe direction. `rel` is omitted (not `false`) on a value entry, so every
+// pre-existing (value-only) caller's `{fn, sutRel}` shape stays byte-identical.
 export function jvmInstanceSuts(body, testCode, absTest, srcFiles, dir, lang) {
   if (lang !== 'kotlin' && lang !== 'java') return [];
   const maskedTestCode = codeOnly(testCode, lang);
-  const frags = pinnedFragments(body, undefined, lang); // pinnedFragments masks its own copy of `body`
+  const byKind = pinnedFragmentsByKind(body, undefined, lang); // masks its own copy of `body`
   const out = []; const seen = new Set();
-  const credit = (method, sutRel) => {
+  const credit = (method, sutRel, rel) => {
     const key = method + '::' + sutRel;
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ fn: method, sutRel });
+    out.push(rel ? { fn: method, sutRel, rel: true } : { fn: method, sutRel });
   };
-  for (const frag of frags) {
-    for (const { receiver, method } of instanceCallsIn(frag)) {
-      const type = lang === 'kotlin' ? inferKotlinReceiverType(maskedTestCode, receiver) : inferJavaReceiverType(maskedTestCode, receiver);
-      if (!type) continue; // runtime type not a directly-visible constructor (annotation/factory/chain/ambiguous) — skip
-      const sutRel = jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang);
-      if (!sutRel) continue;
-      credit(method, sutRel);
-    }
-    // INLINE receiver (T3): Kotlin `X(...).m(...)` / Java `new X(...).m(...)` directly in this same
-    // pinned fragment — no assignment, no variable. Routed through the IDENTICAL shared credit chain
-    // above (jvmCreditTypeMethod) — a wrong-target inline credit is exactly as much a false verdict as a
-    // wrong-target variable credit, so it gets exactly the same guards, never fewer. Frags only (no hop
-    // infra on JVM — documented asymmetry with JS, not a correctness issue: pinnedFragments already masks/
-    // scopes the pinned assertion text, and JVM has no bare-var-hop discipline to mirror).
-    for (const { type, method } of jvmInlineCtorMethodCallsIn(frag, lang)) {
-      const sutRel = jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang);
-      if (!sutRel) continue;
-      credit(method, sutRel);
+  for (const [frags, rel] of [[byKind.value, false], [byKind.relational, true]]) {
+    for (const frag of frags) {
+      for (const { receiver, method } of instanceCallsIn(frag)) {
+        const type = lang === 'kotlin' ? inferKotlinReceiverType(maskedTestCode, receiver) : inferJavaReceiverType(maskedTestCode, receiver);
+        if (!type) continue; // runtime type not a directly-visible constructor (annotation/factory/chain/ambiguous) — skip
+        const sutRel = jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang);
+        if (!sutRel) continue;
+        credit(method, sutRel, rel);
+      }
+      // INLINE receiver (T3): Kotlin `X(...).m(...)` / Java `new X(...).m(...)` directly in this same
+      // pinned fragment — no assignment, no variable. Routed through the IDENTICAL shared credit chain
+      // above (jvmCreditTypeMethod) — a wrong-target inline credit is exactly as much a false verdict as a
+      // wrong-target variable credit, so it gets exactly the same guards, never fewer. Frags only (no hop
+      // infra on JVM — documented asymmetry with JS, not a correctness issue: pinnedFragments already
+      // masks/scopes the pinned assertion text, and JVM has no bare-var-hop discipline to mirror).
+      for (const { type, method } of jvmInlineCtorMethodCallsIn(frag, lang)) {
+        const sutRel = jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang);
+        if (!sutRel) continue;
+        credit(method, sutRel, rel);
+      }
     }
   }
   return out;
@@ -2035,81 +2289,91 @@ function jsCreditTypeMethod(type, method, maskedTestCode, absTest, srcFiles, imp
   return toPosix(relative(dir, classFileAbs));
 }
 
-// jsInstanceSuts(body, testCode, absTest, srcFiles, imports, dir) → [{fn, sutRel}], one entry per pinned
-// receiver'd instance call this block makes that resolves SAFELY end-to-end. `body` is THIS block's own
-// source (scopes the pinned-call scan to calls this specific test actually makes); `testCode` is the
-// WHOLE test file (scopes the receiver's constructor-assignment scan across block-local construction AND
-// a shared `beforeEach`/field setup). JS/TS only — the caller never reaches this for Python/JVM (see
-// prove()'s block loop), so those paths stay byte-identical. Purely ADDITIVE: the caller merges this with
-// the existing bare-name eligible list, deduped by (fn, sutRel) — it never removes anything sutFnsIn/
-// resolveSut already found, and it never adds a bare name to candidateFns.
+// jsInstanceSuts(body, testCode, absTest, srcFiles, imports, dir) → [{fn, sutRel, rel?}], one entry per
+// pinned receiver'd instance call this block makes that resolves SAFELY end-to-end. `body` is THIS
+// block's own source (scopes the pinned-call scan to calls this specific test actually makes); `testCode`
+// is the WHOLE test file (scopes the receiver's constructor-assignment scan across block-local
+// construction AND a shared `beforeEach`/field setup). JS/TS only — the caller never reaches this for
+// Python/JVM (see prove()'s block loop), so those paths stay byte-identical. Purely ADDITIVE: the caller
+// merges this with the existing bare-name eligible list, deduped by (fn, sutRel) — it never removes
+// anything sutFnsIn/resolveSut already found, and it never adds a bare name to candidateFns.
+// Per-kind crediting (relational-assert reach, Task 6, mirrors jvmInstanceSuts): value fragments are
+// scanned FIRST, relational SECOND, so a (method, sutRel) pair reachable through both kinds is credited
+// as a VALUE entry (the `seen` dedupe keeps whichever kind got there first) — a relational credit can
+// prove but never convict, so letting a value credit win is the safe direction. `rel` is omitted (not
+// `false`) on a value entry, so every pre-existing (value-only) caller's `{fn, sutRel}` shape stays
+// byte-identical. File-level pre-computation (maskedTestCode/MOCK_TAINT/paramNames/masked) stays outside
+// the kind loop — only fragment-derived inputs (bareVars, texts) rebuild per kind.
 export function jsInstanceSuts(body, testCode, absTest, srcFiles, imports, dir) {
   const maskedTestCode = codeOnly(testCode, 'typescript');
   if (MOCK_TAINT.test(maskedTestCode)) return []; // file-wide mock-framework taint (fixture 3)
   const paramNames = jsParamNames(maskedTestCode);
 
   const masked = codeOnly(body, 'typescript');
-  const frags = pinnedFragments(masked, imports);
-  if (!frags.length) return [];
-
-  // one variable hop, mirroring eligibleFns' own bare-var hop: a pinned bare var assigned (same-line,
-  // single-assignment only) from an instance-call RHS. bareVars is the set of identifiers appearing
-  // anywhere in a pinned fragment (over-inclusive-but-safe, same discipline as eligibleFns).
-  const bareVars = new Set();
-  for (const f of frags) for (const v of f.matchAll(/(?<![.\w$])([A-Za-z_$]\w*)\b/g)) bareVars.add(v[1]);
-  const texts = [...frags];
-  // Arrow-aware annotation-skip group — same fix, same reasoning, as eligibleFns' const/let/var hop.
-  for (const m of masked.matchAll(/(?:const|let|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
-    if (!bareVars.has(m[1])) continue;
-    // reassigned pinned var (fixture 15): >1 assignment to this name anywhere in the masked block body
-    // means the pinned value may not be THIS declaration's RHS result at all — refuse the hop outright,
-    // stricter than the existing bare-name hop (never retrofit that shipped behavior this cycle).
-    // The count regex carries the SAME arrow-aware annotation-skip group between the name and `=`: without
-    // it, an ANNOTATED declaration's own `=` never matched (the `: Type` sits in between), so an annotated
-    // `let c: Calc = new Calc()` reassigned once elsewhere read asnCount 1 instead of 2 — the declaration's
-    // own assignment silently uncounted — and this guard failed to fire on a genuinely ambiguous pin.
-    const asnCount = (masked.match(new RegExp(`(?<![\\w$.])${reEsc(m[1])}(?:\\s*:\\s*(?:=>|[^=\\n])+?)?\\s*=(?![=>])`, 'g')) || []).length;
-    if (asnCount > 1) continue;
-    texts.push(m[2]);
-  }
+  const byKind = pinnedFragmentsByKind(masked, imports); // masks its own (already-masked) copy of `body`
 
   const out = []; const seen = new Set();
-  const credit = (method, sutRel) => {
+  const credit = (method, sutRel, rel) => {
     const key = method + '::' + sutRel;
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ fn: method, sutRel });
+    out.push(rel ? { fn: method, sutRel, rel: true } : { fn: method, sutRel });
   };
-  for (const text of texts) {
-    if (hasTopLevelShortCircuit(text)) continue; // dead-branch refusal (fixture 8), every scan text
-    for (const { receiver, method } of instanceCallsIn(text)) {
-      if (paramNames.has(receiver)) continue; // (a) receiver shadowed by a callback param (fixture 9)
+  for (const [frags, rel] of [[byKind.value, false], [byKind.relational, true]]) {
+    if (!frags.length) continue;
 
-      // (b) receiver-taint: monkey-patch (`service.decrypt = …`) or Object.assign/defineProperty(receiver, …)
-      const recvE = reEsc(receiver);
-      const monkeyPatched = new RegExp(`\\b${recvE}\\s*\\.\\s*[A-Za-z_$][\\w$]*\\s*=(?![=>])`).test(maskedTestCode);
-      const objectPatched = new RegExp(`\\bObject\\s*\\.\\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\\s*\\(\\s*${recvE}\\b`).test(maskedTestCode);
-      if (monkeyPatched || objectPatched) continue; // fixture 4
-
-      // (c) runtime type from a directly-visible constructor call — REUSES the shared helper untouched.
-      const type = inferReceiverTypeFromCtor(maskedTestCode, jsAssignRe(receiver), jsCtorAt);
-      if (!type) continue; // mock/factory/reassigned-to-non-ctor/two-ctor-types (fixtures 1,2,10,11)
-
-      // (d)-(g3)+(§8.1): the shared type->method credit chain (T1 extraction) — identical for variable
-      // and inline receivers.
-      const sutRel = jsCreditTypeMethod(type, method, maskedTestCode, absTest, srcFiles, imports, dir);
-      if (!sutRel) continue;
-      credit(method, sutRel);
+    // one variable hop, mirroring eligibleFns' own bare-var hop: a pinned bare var assigned (same-line,
+    // single-assignment only) from an instance-call RHS. bareVars is the set of identifiers appearing
+    // anywhere in a pinned fragment (over-inclusive-but-safe, same discipline as eligibleFns).
+    const bareVars = new Set();
+    for (const f of frags) for (const v of f.matchAll(/(?<![.\w$])([A-Za-z_$]\w*)\b/g)) bareVars.add(v[1]);
+    const texts = [...frags];
+    // Arrow-aware annotation-skip group — same fix, same reasoning, as eligibleFns' const/let/var hop.
+    for (const m of masked.matchAll(/(?:const|let|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
+      if (!bareVars.has(m[1])) continue;
+      // reassigned pinned var (fixture 15): >1 assignment to this name anywhere in the masked block body
+      // means the pinned value may not be THIS declaration's RHS result at all — refuse the hop outright,
+      // stricter than the existing bare-name hop (never retrofit that shipped behavior this cycle).
+      // The count regex carries the SAME arrow-aware annotation-skip group between the name and `=`: without
+      // it, an ANNOTATED declaration's own `=` never matched (the `: Type` sits in between), so an annotated
+      // `let c: Calc = new Calc()` reassigned once elsewhere read asnCount 1 instead of 2 — the declaration's
+      // own assignment silently uncounted — and this guard failed to fire on a genuinely ambiguous pin.
+      const asnCount = (masked.match(new RegExp(`(?<![\\w$.])${reEsc(m[1])}(?:\\s*:\\s*(?:=>|[^=\\n])+?)?\\s*=(?![=>])`, 'g')) || []).length;
+      if (asnCount > 1) continue;
+      texts.push(m[2]);
     }
-    // INLINE receiver (T2): `new X(...).m(...)` directly in this same pinned fragment / hop-RHS text — no
-    // assignment, no variable. Scanned under the SAME hasTopLevelShortCircuit/MOCK_TAINT gates as the
-    // variable path above (the taint gate is checked once at function top; short-circuit just above), then
-    // routed through the identical shared credit chain — a wrong-target inline credit is exactly as much a
-    // false verdict as a wrong-target variable credit, so it gets exactly the same guards, never fewer.
-    for (const { type, method } of jsInlineCtorMethodCallsIn(text)) {
-      const sutRel = jsCreditTypeMethod(type, method, maskedTestCode, absTest, srcFiles, imports, dir);
-      if (!sutRel) continue;
-      credit(method, sutRel);
+
+    for (const text of texts) {
+      if (hasTopLevelShortCircuit(text)) continue; // dead-branch refusal (fixture 8), every scan text
+      for (const { receiver, method } of instanceCallsIn(text)) {
+        if (paramNames.has(receiver)) continue; // (a) receiver shadowed by a callback param (fixture 9)
+
+        // (b) receiver-taint: monkey-patch (`service.decrypt = …`) or Object.assign/defineProperty(receiver, …)
+        const recvE = reEsc(receiver);
+        const monkeyPatched = new RegExp(`\\b${recvE}\\s*\\.\\s*[A-Za-z_$][\\w$]*\\s*=(?![=>])`).test(maskedTestCode);
+        const objectPatched = new RegExp(`\\bObject\\s*\\.\\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\\s*\\(\\s*${recvE}\\b`).test(maskedTestCode);
+        if (monkeyPatched || objectPatched) continue; // fixture 4
+
+        // (c) runtime type from a directly-visible constructor call — REUSES the shared helper untouched.
+        const type = inferReceiverTypeFromCtor(maskedTestCode, jsAssignRe(receiver), jsCtorAt);
+        if (!type) continue; // mock/factory/reassigned-to-non-ctor/two-ctor-types (fixtures 1,2,10,11)
+
+        // (d)-(g3)+(§8.1): the shared type->method credit chain (T1 extraction) — identical for variable
+        // and inline receivers.
+        const sutRel = jsCreditTypeMethod(type, method, maskedTestCode, absTest, srcFiles, imports, dir);
+        if (!sutRel) continue;
+        credit(method, sutRel, rel);
+      }
+      // INLINE receiver (T2): `new X(...).m(...)` directly in this same pinned fragment / hop-RHS text — no
+      // assignment, no variable. Scanned under the SAME hasTopLevelShortCircuit/MOCK_TAINT gates as the
+      // variable path above (the taint gate is checked once at function top; short-circuit just above), then
+      // routed through the identical shared credit chain — a wrong-target inline credit is exactly as much a
+      // false verdict as a wrong-target variable credit, so it gets exactly the same guards, never fewer.
+      for (const { type, method } of jsInlineCtorMethodCallsIn(text)) {
+        const sutRel = jsCreditTypeMethod(type, method, maskedTestCode, absTest, srcFiles, imports, dir);
+        if (!sutRel) continue;
+        credit(method, sutRel, rel);
+      }
     }
   }
   return out;
@@ -2291,6 +2555,20 @@ export function prove(dir, opts = {}) {
   // but one verdict, so probes ≥ scored always; the excess is multi-function blocks (plus any
   // survivors inside a caught block, surfaced separately as grossSurvivors). pct reads caught/scored only.
   let caught = 0; const hollow = []; const inconclusive = []; const skipped = []; const weak = []; const oneSided = []; let oneSidedBlocks = 0; let probes = 0; let outOfScope = 0; let capped = 0; let envAborted = 0;
+  // Stale-build gate memo (field report 2026-07-18), gradle-only: one entry per sut file, the LAST
+  // mutant content this run itself watched compile fresh (a bare line). The SAME sut function is
+  // routinely gutted more than once in a single run — any other test block that also calls it gets an
+  // independent probe (see the survivorTally header above) — and gutting it twice with the SAME
+  // deterministic sentinel writes byte-identical content both times. Gradle's own (correct, always-on)
+  // incremental build then reports the SECOND occurrence UP-TO-DATE relative to the FIRST — not a race,
+  // just Gradle correctly recognizing it already built exactly this moments ago. Keyed by file and valued
+  // by content (not an ever-seen set of every mutant this run built) so a STALE read is trusted only when
+  // it matches the MOST RECENT thing this run verified compiling for that file — a result that's
+  // UP-TO-DATE relative to some OTHER, older content this run built earlier (an old-Gradle interleaving:
+  // gut fn A, gut fn B, gut fn A again with a DIFFERENT sentinel than the first time — rare, but possible
+  // under --deep's opposite-mutant interleaving) must still fail closed, never ride on a stale match to
+  // the wrong content. See survivorEvidenceValid (above parseGradleResults) for the read/write contract.
+  const lastCompiled = new Map();
   // true denominators for the --deep identity-stub advisory — per-fn, not per-test: stubbed = passthrough
   // probes attempted for fn, passed = the stub survived (also lands in `weak`). An audit found most
   // survivors legitimate (no-op branches / accidental fixed points), so this reports ratios, never a
@@ -2312,6 +2590,230 @@ export function prove(dir, opts = {}) {
   // hollow branch's flake-failed sibling contribute nothing.
   const survivorTally = new Map();
   const tallyKey = (sutRel, fn) => sutRel + '::' + fn;
+  // Cap two-pass (budget-starvation fix): a relational fn in an early block must never spend
+  // --max-probes budget a later block's VALUE verdict needs. gutOneFn/foldBlock/deferredBlocks below
+  // split each block's per-fn gut work from its verdict fold, so the fold can run later (pass 2) than
+  // the gutting that feeds it — without touching the fold's own logic at all.
+  //
+  // gutOneFn: the single per-fn mutate→run→classify step, shared by pass 1 (value-only entries, gutted
+  // inline as each block is reached — old-engine parity) and pass 2 (deferred relational entries,
+  // gutted after every test file's value work is done). Mutates `ctx` in place: ctx.anyGutted/
+  // sawCompileFail are plain properties (not `let`s) precisely so a later call — same block, later
+  // pass — can flip them and have foldBlock(ctx) see the update; ctx.brokeFns/survivorFns/survivors
+  // are arrays, mutated by push either way. Body is byte-identical to the pre-cap-two-pass inline gut
+  // loop, just field-qualified onto ctx instead of closing over per-block `let`s.
+  const gutOneFn = (ctx, fn, sutRel, isRel) => {
+    const abs = join(ctx.work, sutRel); let orig; try { orig = readFileSync(abs, 'utf8'); } catch { return; }
+    const lang = sutRel.endsWith('.py') ? 'python' : sutRel.endsWith('.kt') ? 'kotlin' : sutRel.endsWith('.java') ? 'java' : 'typescript';
+    const broken = grossBreak(orig, fn, lang);
+    if (broken === null || broken === orig) return;
+    if (ctx.runner === 'gradle' || ctx.runner === 'maven') {
+      // A gradle/maven mutant can fail to COMPILE (a type-changing sentinel against a non-numeric/
+      // non-string return type, e.g. List<Int>) — that is not a weak test surviving a real mutant, it
+      // is no valid mutant existing at all. Treat it exactly as grossBreak returning null for this fn:
+      // never counted (no anyGutted, no probes++), revert, move to the next eligible fn. A block
+      // whose every eligible fn compile-fails then falls through to the existing 'ungutable' skip
+      // below — never inconclusive, never caught.
+      writeFileSync(abs, broken);
+      const r = runOne(ctx.work, ctx.runner, ctx.rel, ctx.selectName, ctx.timeoutMs, ctx.selectQualified);
+      writeFileSync(abs, orig);
+      if (r.compiled === false) { ctx.sawCompileFail = true; return; }
+      // Stale-build gate (field report 2026-07-18): a survivor is only evidence if the mutant was in
+      // the build — see survivorEvidenceValid's own header comment for the full contract (vfs-watch race
+      // mechanism + the lastCompiled memo). Only gradle carries this belt-and-suspenders check (maven has
+      // no equivalent live-verified console signal — see mavenCompiled's own header note on why gradle
+      // needed a second detector at all). A veto is treated EXACTLY like a compile-fail: never counted,
+      // never a survivor, falls through to the 'ungutable' skip below rather than minting a false hollow
+      // off a build that never saw the mutant.
+      if (ctx.runner === 'gradle' && !survivorEvidenceValid(r, sutRel, broken, lastCompiled)) { ctx.sawCompileFail = true; return; }
+      ctx.anyGutted = true; probes++;
+      if (r.failed > 0) ctx.brokeFns.push({ fn, abs, orig, lang, rel: isRel });
+      else if (r.passed > 0) { ctx.survivors.push(fn); ctx.survivorFns.push({ fn, abs, orig, lang, rel: isRel }); }
+      return;
+    }
+    ctx.anyGutted = true; probes++;
+    writeFileSync(abs, broken);
+    const r = runOne(ctx.work, ctx.runner, ctx.rel, ctx.selectName, ctx.timeoutMs, ctx.selectQualified);
+    writeFileSync(abs, orig);
+    if (r.failed > 0) ctx.brokeFns.push({ fn, abs, orig, lang, rel: isRel });
+    else if (r.passed > 0) { ctx.survivors.push(fn); ctx.survivorFns.push({ fn, abs, orig, lang, rel: isRel }); }
+  };
+  // foldBlock: the verdict fold, extracted verbatim from the inline per-block tail so it can run either
+  // immediately (pass 1, a block with no deferred relational fns — old-engine parity) or later (pass 2,
+  // after this block's deferred relational fns have been drained on leftover budget). Reads/writes the
+  // run-level accumulators by closure (caught, hollow, oneSided, oneSidedBlocks, inconclusive, skipped,
+  // blockRecords, probes, weak, weakSummary) exactly as the inline code did; everything block-specific
+  // travels in `ctx` (see the ctx literal at the call site for the exact field list — it also carries
+  // `tallyBlock`, a per-block closure the inline code already had in scope that isn't otherwise
+  // reconstructible from ctx's other fields).
+  const foldBlock = (ctx) => {
+    const { b, rel, bodyMasked, shadowSignals, sutOf, brokeFns, survivorFns, survivors, anyGutted, sawCompileFail, relStarved, work, runner, selectName, selectQualified, timeoutMs, absTestKey, changed, deep, tallyBlock } = ctx;
+    // Two-sentinel pass — confirm-before-accuse: every SURVIVOR (candidate hollow) is re-gutted with
+    // the opposite-signed sentinel BEFORE verdicting, on every run — a hollow accusation is minted
+    // only when the test stays green in BOTH directions, so it can never be a sentinel-sign accident
+    // (field-observed: two mirror-image threshold tests once drew HOLLOW and PROVEN purely by sign,
+    // the hollow copy contradicting its own receipt). Survivors are rare, so the default cost is
+    // near zero — the extra run is paid exactly when an accusation is at stake, like the R5 recheck.
+    // --deep extends the same pass to the RED side (brokeFns), demoting one-direction-only proofs to
+    // one-sided. oppRed maps fn → the opposite mutant's result; ABSENT = no evidence (no numeric
+    // opposite exists, or it didn't compile, or the run was a 0p/0f non-run) — and no evidence means
+    // no reclassification: the fn keeps its single-sentinel meaning, fail-closed as everywhere else.
+    // R5 flake guard FIRST when an accusation is at stake (no fn broke, some survived): hollow AND
+    // one-sided both rest on the survivor-pass being stable, and an unstable test must stay
+    // inconclusive — never allowed to fake opposite-run evidence (CI caught exactly that bypass when
+    // this guard briefly ran after the opposite mutants). Running it first also skips their cost on
+    // a flaky block.
+    let flakyBlock = false; let flakeChecked = false;
+    if (!brokeFns.length && survivorFns.length) {
+      flakeChecked = true;
+      const recheck = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
+      flakyBlock = !(recheck.passed >= 1 && recheck.failed === 0);
+    }
+    const oppRed = new Map();
+    if (!flakyBlock) for (const { fn, abs, orig, lang } of (deep ? [...brokeFns, ...survivorFns] : (brokeFns.length ? [] : survivorFns))) {
+      const opp = grossBreakOpposite(orig, fn, lang);
+      if (opp === null || opp === orig) continue;
+      probes++;
+      writeFileSync(abs, opp);
+      const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
+      writeFileSync(abs, orig);
+      if ((runner === 'gradle' || runner === 'maven') && r.compiled === false) continue;
+      // Stale-build gate, mirrored (field report 2026-07-18): a stale green on the OPPOSITE run must
+      // never fake opposite-run evidence — that would either wrongly confirm a hollow (survivor side)
+      // or wrongly demote a genuinely bound fn to one-sided (deep-mode brokeFns side). `continue` leaves
+      // oppRed unset for this fn, same as "no opposite mutant exists" — no evidence, no reclassification.
+      // Shares the lastCompiled memo with the primary gut loop (survivorEvidenceValid handles the red-is-
+      // always-valid case internally too, so this reads identically whichever loop reaches it first).
+      if (runner === 'gradle' && !survivorEvidenceValid(r, sutOf.get(fn), opp, lastCompiled)) continue;
+      if (r.failed > 0) oppRed.set(fn, true);
+      else if (r.passed > 0) oppRed.set(fn, false);
+    }
+    // Fn tiers: bound (red under both, or red with no opposite evidence), one-sided (red under
+    // exactly one sentinel), blind (green under both, or green with no opposite evidence). On a
+    // plain run only survivors carry opposite evidence, so bound = brokeFns exactly.
+    const boundFns = brokeFns.filter(({ fn }) => oppRed.get(fn) !== false);
+    const oneSidedFns = [
+      ...brokeFns.filter(({ fn }) => oppRed.get(fn) === false).map((x) => ({ ...x, posRed: true })),
+      ...survivorFns.filter(({ fn }) => oppRed.get(fn) === true).map((x) => ({ ...x, posRed: false })),
+    ];
+    const blindAll = survivorFns.filter(({ fn }) => oppRed.get(fn) !== true);
+    // SAFE-form asymmetry (spec §3): a relational-only credit can prove (red→boundFns) and can be
+    // one-sided (red under exactly one sentinel), but its survival is NOT evidence of a hollow test —
+    // a one-sided relation passes extreme sentinels by construction (assertTrue(score >= 0) survives
+    // +HUGE). Split here, at the same tier gate as every other verdict — never post-filtered.
+    const blindFns = blindAll.filter((x) => !x.rel);
+    const relUnboundFns = blindAll.filter((x) => x.rel);
+    for (const { fn, posRed } of oneSidedFns) oneSided.push({ file: rel, line: b.line, name: b.name, fn, posRed });
+    const oneSidedPairs = oneSidedFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) }));
+    if (boundFns.length) {
+      caught++;
+      // Caught-branch blockRecords now also carries `survivors` (the already-computed local array): a
+      // sibling fn broke this block, but any OTHER eligible fn's own separate mutant run may have
+      // survived — previously computed, never persisted. Purely additive: no existing reader branches
+      // on a `survivors` key for a 'caught'-verdict record (classifyChanges only reads `caughtFns` for
+      // 'caught'), so this changes no verdict, count, or report line.
+      // caughtPairs/survivorPairs: (fn, sutRel) pairs built from THIS block's own sutOf map — the
+      // (fn, file)-identity classifyChanges needs to attribute a verdict without a bare-name collision
+      // across files (mutation/changes.mjs's refEligible/hollowIn/provenIn). In-memory only, same as
+      // caughtFns/survivors — never surfaced in r.hollow or formatReport.
+      // testChanged (same-diff-oracle provenance, Task 7): whether THIS test FILE was itself part of
+      // the diff (`absTestKey` is computed once per test file, above) — a fact classifyChanges can
+      // later fold into a proven row's evidence (every binding block's test file changed in this diff
+      // → the oracle is same-diff, worth stating as fact, not a verdict). false on a full-scan run
+      // (changed is null) — there is no "this diff" to be same to.
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'caught', caughtFns: boundFns.map((x) => x.fn), survivors, caughtPairs: boundFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) })), survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}), testChanged: changed ? changed.has(absTestKey) : false });
+      tallyBlock(brokeFns.map((x) => x.fn), survivors);
+    }
+    else if (flakyBlock) {
+      // R5 flake guard verdict: the survivor-pass proves nothing on an unstable test — never a
+      // hollow, never a one-sided; the opposite mutants were skipped above for the same reason.
+      const why = 'flaky baseline (unstable green) — not a reliable HOLLOW';
+      inconclusive.push({ file: rel, line: b.line, name: b.name, why });
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
+    }
+    else if (relStarved && (blindFns.length || oneSidedFns.length)) {
+      // Belt-and-braces (structural insurance against future defer-decision drift): a hollow or
+      // one-sided VERDICT from a block that still has an un-probed eligible rel fn is unsound — the
+      // dispatch above already guarantees this is unreachable for the accusation-shaped case (it never
+      // defers at all, so `relStarved` stays false there), but if a future change ever lets a starved
+      // rel fn reach here, fail closed to the same probe-cap accounting the pass-2 drain uses, rather
+      // than mint a verdict on partial evidence. (The oneSided[] per-fn push above is unaffected — it is
+      // independent per-fn evidence, same as it already coexists with a 'caught' block verdict.)
+      capped++;
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why: 'probe-cap' });
+    }
+    else if (blindFns.length) {
+      // Stability was already verified by the pre-opposite R5 check for accusation-shaped blocks.
+      // The one path that arrives here unchecked is deep-only — brokeFns existed but every one
+      // demoted to one-sided — so run the same guard now, before the accusation.
+      const recheck = flakeChecked ? null : runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
+      if (recheck === null || (recheck.passed >= 1 && recheck.failed === 0)) {
+        const blindNames = blindFns.map((x) => x.fn);
+        hollow.push({ file: rel, line: b.line, name: b.name, survivors: blindNames, survivorPairs: blindFns.map(({ fn }) => ({ fn, sutRel: sutOf.get(fn) })) });
+        blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'hollow', survivors: blindNames, survivorPairs: blindFns.map(({ fn }) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}) });
+        // Deliberately NOT tallied into survivorTally: a hollow block's survivors are already reported
+        // via r.hollow at higher severity — grossSurvivors is the NOVEL observation class only
+        // (survivals inside caught blocks, reported nowhere else); tallying here would double-count.
+      } else {
+        const why = 'flaky baseline (unstable green) — not a reliable HOLLOW';
+        inconclusive.push({ file: rel, line: b.line, name: b.name, why });
+        blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
+      }
+    }
+    else if (oneSidedFns.length) {
+      // Deep-only tier: every gutted fn went red under exactly one sentinel — the test binds one
+      // direction of error. A verdict (counts in scored), never a blocker: only hollow exits 1,
+      // so --deep can clear a sign-accident hollow but can never manufacture a new block.
+      oneSidedBlocks++;
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'one-sided', oneSidedPairs });
+    }
+    else if (relUnboundFns.length) {
+      // Every gutted fn is a relational-only survivor under both sentinels: the relation binds
+      // neither direction against an extreme, so the honest answer is "can't verify" — routed
+      // through the existing skip plumbing (never scored, never exits 1, spec §3).
+      const why = 'relation-unbound';
+      skipped.push({ file: rel, line: b.line, name: b.name, why });
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why, ...(oneSidedPairs.length ? { oneSidedPairs } : {}) });
+    }
+    else if (anyGutted) {
+      const why = 'mutant ran 0 tests';
+      inconclusive.push({ file: rel, line: b.line, name: b.name, why });
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
+    }
+    else {
+      // 'ungutable' is honest only when at least one eligible entry's body WAS located and gutted but
+      // the compiler rejected the mutant (the gradle compile-fail path above) — the only path that can
+      // currently prove "located but unmutatable". Every other way to land here means no eligible
+      // entry's body was ever located/mutated at all (the ctor-name dead-end, an overload-ambiguous fn,
+      // an unlocatable body) — 'sut-unresolved' is the truthful label (existing plumbing: the
+      // "tested function not locatable" banner, UNVERIFIABLE_REASON_MSG).
+      const why = sawCompileFail ? 'ungutable' : 'sut-unresolved';
+      skipped.push({ file: rel, line: b.line, name: b.name, why });
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why });
+    }
+    // Depth tier (opt-in): a fn the gross stub broke but an IDENTITY stub does not was only exercised on
+    // a fixed point — the assertion does not pin the function's transformation. Advisory, not a finding.
+    // Suppressed for a fn with a production first-param identity branch (`return label`, `?: label`,
+    // `else a`, …): there the stub is indistinguishable from correct behavior and the branch's own
+    // tests survive it BY CONSTRUCTION — field-observed as 5/5 false advisories in one wild run.
+    if (deep) for (const { fn, abs, orig, lang } of brokeFns) {
+      if (hasFirstParamIdentityBranch(orig, fn, lang)) continue;
+      const stub = passthroughBreak(orig, fn, lang);
+      if (stub === null || stub === orig) continue;
+      probes++;
+      writeFileSync(abs, stub);
+      const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
+      writeFileSync(abs, orig);
+      if ((runner === 'gradle' || runner === 'maven') && r.compiled === false) continue; // identity stub didn't type-check → not a weak survivor
+      if (!weakSummary[fn]) weakSummary[fn] = { stubbed: 0, passed: 0 };
+      weakSummary[fn].stubbed++;
+      if (r.failed === 0 && r.passed > 0) { weak.push({ file: rel, line: b.line, name: b.name, fn }); weakSummary[fn].passed++; }
+    }
+  };
+  // deferredBlocks: run-global queue of { ctx, deferredRel } — every block whose gut loop collected at
+  // least one relational fn lands here instead of folding inline; drained in pass 2, after the whole
+  // testFiles loop (see below), on whatever probe/time budget is left.
+  const deferredBlocks = [];
   try {
     // cpSync throws raw (EACCES, …) on an unreadable file/subdir anywhere in the tree — caught here so
     // that surfaces as a friendly scopeError instead of a stack trace. The return stays inside this outer
@@ -2354,7 +2856,7 @@ export function prove(dir, opts = {}) {
         }
         continue;
       }
-      const imports = importMap(code);
+      const imports = importMap(code, L); // L: kotlin-gated bare-import parsing (field report #3); no-op for JS/py/java
       // Python precision path: when python3/python is available, the stdlib-ast helper gives the test
       // blocks + which SUT calls are value-PINNED + the `from … import` bindings — so a unittest
       // `self.assertEqual(...)` block becomes eligible (the regex pinnedFragments misses it). Falls back to
@@ -2381,7 +2883,21 @@ export function prove(dir, opts = {}) {
       // wrongLayerShadow whole-file shared-setup suppression (design doc's case (c)) — computed ONCE per
       // test file, JVM only (see jvmFileHasSharedSetupContact's header for why JS/py don't get this).
       const jvmSharedSetupContact = (jvmLang && !budgetExhausted()) ? jvmFileHasSharedSetupContact(code, absTest, srcFiles, dir, jvmLang) : false;
-      const blocks = pyAst ? pyAst.blocks : parseBlocks(code, L);
+      const blocks0 = pyAst ? pyAst.blocks : parseBlocks(code, L);
+      // Value-pins-first under a cap (spec §4): only RELATIONAL-ONLY blocks are deprioritized — a
+      // no-pin block keeps its source position, so a repo with zero relational asserts keeps
+      // byte-identical output (spec §6.3), r.skipped row order included. Pre-classification stays
+      // REGEX-ONLY (pinnedFragmentsByKind / already-computed pyAst pins — no fs, no resolvers, no
+      // spawns), same cost class as the parseBlocks scan that already ran. Resolution work still
+      // happens only at a block's own turn (the budget invariant above). Single pass, stable.
+      const isRelOnly = (b) => {
+        if (pyAst) return b.pins.length === 0 && (b.relPins || []).length > 0;
+        const k = pinnedFragmentsByKind(b.body, imports, jvmLang);
+        return k.value.length === 0 && k.relational.length > 0;
+      };
+      const front = []; const rear = [];
+      for (const b of blocks0) (isRelOnly(b) ? rear : front).push(b);
+      const blocks = [...front, ...rear];
       const ambiguous = ambiguousNames(blocks.map((b) => b.name), runner);
       // Stage 2 (only when stage 1 found anything — residualAmbiguous is a no-op-safe pure fn either way,
       // but skipping it on the common empty case avoids a wasted O(n^2) pass over every file's blocks).
@@ -2434,12 +2950,21 @@ export function prove(dir, opts = {}) {
         const shadowSignals = { noContact, selfEcho, shadowTargets };
         // pyAst pins are already fn-linked by py_blocks.py, so hadPin collapses to "any pin" there —
         // the pin-unresolved split below is only ever reachable on the JS/TS/JVM textual-scan path.
+        // relPins (relational-assert reach, Task 5): merged in with `pins` for `eligible` (either kind
+        // makes the fn probeable) but reported separately as `relationalOnly` — a fn present in BOTH
+        // b.pins and b.relPins stays value-class (the filter below excludes it from relationalOnly),
+        // matching py_blocks.py's own dedup of relPins against pins.
         const pinDetail = pyAst
-          ? { eligible: [...new Set(b.pins)], hadPin: b.pins.length > 0 }
+          ? {
+              eligible: [...new Set([...b.pins, ...(b.relPins || [])])],
+              relationalOnly: (b.relPins || []).filter((f) => !b.pins.includes(f)),
+              hadPin: b.pins.length + (b.relPins || []).length > 0,
+            }
           : eligibleFnsDetail(b.body, sutFnsIn(b.body, jvmLang), imports, jvmLang);
         const pinnedFns = pinDetail.eligible;
+        const relOnly = new Set(pinDetail.relationalOnly || []);
         const eligible = pinnedFns
-          .map((fn) => ({ fn, sutRel: pyAst ? resolvePySut(fn, pyAst.imports, absTest, srcFiles, dir) : jvmLang ? resolveJvmSut(fn, code, absTest, srcFiles, dir, jvmLang) : resolveSut(fn, absTest, imports) }))
+          .map((fn) => ({ fn, sutRel: pyAst ? resolvePySut(fn, pyAst.imports, absTest, srcFiles, dir) : jvmLang ? resolveJvmSut(fn, code, absTest, srcFiles, dir, jvmLang) : resolveSut(fn, absTest, imports), rel: relOnly.has(fn) }))
           .filter((x) => x.sutRel);
         // JVM instance-method reach (jvm-instance-reach): a lowercase-receiver call (`analyzer.compute(x)`)
         // that sutFnsIn never captures at all — resolved separately via receiver-TYPE inference, so it
@@ -2578,165 +3103,83 @@ export function prove(dir, opts = {}) {
           continue;
         }
         baselineOk++; // a green baseline exists — the env is not wiped out, so env-abort never fires from here on
-        const survivors = []; let anyGutted = false; const brokeFns = []; let sawCompileFail = false;
-        const survivorFns = []; // {fn, abs, orig, lang} mirror of `survivors` — the --deep opposite-sentinel pass re-guts them
-        for (const { fn, sutRel } of eligible) {
-          const abs = join(work, sutRel); let orig; try { orig = readFileSync(abs, 'utf8'); } catch { continue; }
-          const lang = sutRel.endsWith('.py') ? 'python' : sutRel.endsWith('.kt') ? 'kotlin' : sutRel.endsWith('.java') ? 'java' : 'typescript';
-          const broken = grossBreak(orig, fn, lang);
-          if (broken === null || broken === orig) continue;
-          if (runner === 'gradle' || runner === 'maven') {
-            // A gradle/maven mutant can fail to COMPILE (a type-changing sentinel against a non-numeric/
-            // non-string return type, e.g. List<Int>) — that is not a weak test surviving a real mutant, it
-            // is no valid mutant existing at all. Treat it exactly as grossBreak returning null for this fn:
-            // never counted (no anyGutted, no probes++), revert, move to the next eligible fn. A block
-            // whose every eligible fn compile-fails then falls through to the existing 'ungutable' skip
-            // below — never inconclusive, never caught.
-            writeFileSync(abs, broken);
-            const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
-            writeFileSync(abs, orig);
-            if (r.compiled === false) { sawCompileFail = true; continue; }
-            anyGutted = true; probes++;
-            if (r.failed > 0) brokeFns.push({ fn, abs, orig, lang });
-            else if (r.passed > 0) { survivors.push(fn); survivorFns.push({ fn, abs, orig, lang }); }
-            continue;
-          }
-          anyGutted = true; probes++;
-          writeFileSync(abs, broken);
-          const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
-          writeFileSync(abs, orig);
-          if (r.failed > 0) brokeFns.push({ fn, abs, orig, lang });
-          else if (r.passed > 0) { survivors.push(fn); survivorFns.push({ fn, abs, orig, lang }); }
+        // ctx carries everything foldBlock needs for THIS block, gathered exactly where the inline code
+        // used to declare its own locals — anyGutted/sawCompileFail are plain properties (not `let`s)
+        // so pass 2 can flip them after pass 1 has already built this object; brokeFns/survivorFns/
+        // survivors are arrays, mutated by push either way.
+        const ctx = { b, rel, bodyMasked, shadowSignals, eligible, sutOf, brokeFns: [], survivorFns: [], survivors: [], anyGutted: false, sawCompileFail: false, relStarved: false, work, runner, selectName, selectQualified, timeoutMs, absTestKey, changed, deep: opts.deep, tallyBlock };
+        const deferredRel = [];
+        // Split by kind (cap two-pass): a falsy-`rel` entry guts inline, right here, exactly as before —
+        // pass 1's value probing is byte-equivalent to the pre-cap-two-pass engine for a block with no
+        // relational fns. A truthy-`rel` entry is NEVER gutted here; it is collected so its probe cost is
+        // paid in pass 2, after every test file's value work has already run — a relational fn in an
+        // early block can no longer eat the --max-probes budget a later block's value verdict (including
+        // a hollow accusation) needs.
+        // `rel: isRel` — the destructured field is renamed on the way in: this loop already has an
+        // outer `rel` in scope (the test FILE's relative path). Binding the per-entry relational flag to
+        // the bare name `rel` would shadow it for the rest of this loop body.
+        const hasValueFns = eligible.some((e) => !e.rel);
+        for (const { fn, sutRel, rel: isRel } of eligible) {
+          if (isRel) { deferredRel.push({ fn, sutRel, rel: isRel }); continue; }
+          gutOneFn(ctx, fn, sutRel, isRel);
         }
-        // Two-sentinel pass — confirm-before-accuse: every SURVIVOR (candidate hollow) is re-gutted with
-        // the opposite-signed sentinel BEFORE verdicting, on every run — a hollow accusation is minted
-        // only when the test stays green in BOTH directions, so it can never be a sentinel-sign accident
-        // (field-observed: two mirror-image threshold tests once drew HOLLOW and PROVEN purely by sign,
-        // the hollow copy contradicting its own receipt). Survivors are rare, so the default cost is
-        // near zero — the extra run is paid exactly when an accusation is at stake, like the R5 recheck.
-        // --deep extends the same pass to the RED side (brokeFns), demoting one-direction-only proofs to
-        // one-sided. oppRed maps fn → the opposite mutant's result; ABSENT = no evidence (no numeric
-        // opposite exists, or it didn't compile, or the run was a 0p/0f non-run) — and no evidence means
-        // no reclassification: the fn keeps its single-sentinel meaning, fail-closed as everywhere else.
-        // R5 flake guard FIRST when an accusation is at stake (no fn broke, some survived): hollow AND
-        // one-sided both rest on the survivor-pass being stable, and an unstable test must stay
-        // inconclusive — never allowed to fake opposite-run evidence (CI caught exactly that bypass when
-        // this guard briefly ran after the opposite mutants). Running it first also skips their cost on
-        // a flaky block.
-        let flakyBlock = false; let flakeChecked = false;
-        if (!brokeFns.length && survivorFns.length) {
-          flakeChecked = true;
-          const recheck = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
-          flakyBlock = !(recheck.passed >= 1 && recheck.failed === 0);
+        if (deferredRel.length === 0) {
+          // No relational fns in this block: fold immediately, at the same point in the loop as before —
+          // old-engine parity for every value-only block.
+          foldBlock(ctx);
+        } else if (hasValueFns && ctx.brokeFns.length === 0) {
+          // Accusation-shaped (confirm-before-accuse extended to budget): this block has value fns, and
+          // NONE of them broke — the value evidence alone could already read hollow/blind, so a rel fn
+          // still sitting unprobed in pass 2 is not "pure upside" here the way it is for a caught-locked
+          // block below. Deferring risks pass 2 starving it and folding a HOLLOW on partial evidence that
+          // the full picture would have caught (reviewer-found regression: a rel fn that breaks under its
+          // sentinel, if never gutted, silently leaves a value-only survivor to accuse alone). Gut every
+          // deferred fn INLINE, right now, with NO budget check — an at-stake accusation always pays its
+          // full confirmation cost in this engine (same principle as the R5 recheck and the opposite-
+          // sentinel pass), so this is byte-identical to the pre-cap-two-pass single-pass engine for this
+          // block class. Then fold inline — never deferred, so `ctx.relStarved` stays false.
+          for (const { fn, sutRel, rel: isRel } of deferredRel) gutOneFn(ctx, fn, sutRel, isRel);
+          foldBlock(ctx);
+        } else {
+          // Either caught is already locked in (`ctx.brokeFns.length > 0` — a rel fn's own eventual
+          // result can only ever promote a survivor's opposite-sentinel evidence or add a sibling
+          // one-sided/bound entry; it can never erase the value fn that already broke, so starving it is
+          // pure upside, never a false accusation) or this is a relational-only block (`!hasValueFns` —
+          // no value fn ever existed to be accusation-shaped in the first place; its own fold ceiling is
+          // one-sided/relation-unbound, never hollow — see the SAFE-form asymmetry). Safe to defer.
+          deferredBlocks.push({ ctx, deferredRel });
         }
-        const oppRed = new Map();
-        if (!flakyBlock) for (const { fn, abs, orig, lang } of (opts.deep ? [...brokeFns, ...survivorFns] : (brokeFns.length ? [] : survivorFns))) {
-          const opp = grossBreakOpposite(orig, fn, lang);
-          if (opp === null || opp === orig) continue;
-          probes++;
-          writeFileSync(abs, opp);
-          const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
-          writeFileSync(abs, orig);
-          if ((runner === 'gradle' || runner === 'maven') && r.compiled === false) continue;
-          if (r.failed > 0) oppRed.set(fn, true);
-          else if (r.passed > 0) oppRed.set(fn, false);
-        }
-        // Fn tiers: bound (red under both, or red with no opposite evidence), one-sided (red under
-        // exactly one sentinel), blind (green under both, or green with no opposite evidence). On a
-        // plain run only survivors carry opposite evidence, so bound = brokeFns exactly.
-        const boundFns = brokeFns.filter(({ fn }) => oppRed.get(fn) !== false);
-        const oneSidedFns = [
-          ...brokeFns.filter(({ fn }) => oppRed.get(fn) === false).map((x) => ({ ...x, posRed: true })),
-          ...survivorFns.filter(({ fn }) => oppRed.get(fn) === true).map((x) => ({ ...x, posRed: false })),
-        ];
-        const blindFns = survivorFns.filter(({ fn }) => oppRed.get(fn) !== true);
-        for (const { fn, posRed } of oneSidedFns) oneSided.push({ file: rel, line: b.line, name: b.name, fn, posRed });
-        const oneSidedPairs = oneSidedFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) }));
-        if (boundFns.length) {
-          caught++;
-          // Caught-branch blockRecords now also carries `survivors` (the already-computed local array): a
-          // sibling fn broke this block, but any OTHER eligible fn's own separate mutant run may have
-          // survived — previously computed, never persisted. Purely additive: no existing reader branches
-          // on a `survivors` key for a 'caught'-verdict record (classifyChanges only reads `caughtFns` for
-          // 'caught'), so this changes no verdict, count, or report line.
-          // caughtPairs/survivorPairs: (fn, sutRel) pairs built from THIS block's own sutOf map — the
-          // (fn, file)-identity classifyChanges needs to attribute a verdict without a bare-name collision
-          // across files (mutation/changes.mjs's refEligible/hollowIn/provenIn). In-memory only, same as
-          // caughtFns/survivors — never surfaced in r.hollow or formatReport.
-          // testChanged (same-diff-oracle provenance, Task 7): whether THIS test FILE was itself part of
-          // the diff (`absTestKey` is computed once per test file, above) — a fact classifyChanges can
-          // later fold into a proven row's evidence (every binding block's test file changed in this diff
-          // → the oracle is same-diff, worth stating as fact, not a verdict). false on a full-scan run
-          // (changed is null) — there is no "this diff" to be same to.
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'caught', caughtFns: boundFns.map((x) => x.fn), survivors, caughtPairs: boundFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) })), survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}), testChanged: changed ? changed.has(absTestKey) : false });
-          tallyBlock(brokeFns.map((x) => x.fn), survivors);
-        }
-        else if (flakyBlock) {
-          // R5 flake guard verdict: the survivor-pass proves nothing on an unstable test — never a
-          // hollow, never a one-sided; the opposite mutants were skipped above for the same reason.
-          const why = 'flaky baseline (unstable green) — not a reliable HOLLOW';
-          inconclusive.push({ file: rel, line: b.line, name: b.name, why });
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
-        }
-        else if (blindFns.length) {
-          // Stability was already verified by the pre-opposite R5 check for accusation-shaped blocks.
-          // The one path that arrives here unchecked is deep-only — brokeFns existed but every one
-          // demoted to one-sided — so run the same guard now, before the accusation.
-          const recheck = flakeChecked ? null : runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
-          if (recheck === null || (recheck.passed >= 1 && recheck.failed === 0)) {
-            const blindNames = blindFns.map((x) => x.fn);
-            hollow.push({ file: rel, line: b.line, name: b.name, survivors: blindNames, survivorPairs: blindFns.map(({ fn }) => ({ fn, sutRel: sutOf.get(fn) })) });
-            blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'hollow', survivors: blindNames, survivorPairs: blindFns.map(({ fn }) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}) });
-            // Deliberately NOT tallied into survivorTally: a hollow block's survivors are already reported
-            // via r.hollow at higher severity — grossSurvivors is the NOVEL observation class only
-            // (survivals inside caught blocks, reported nowhere else); tallying here would double-count.
-          } else {
-            const why = 'flaky baseline (unstable green) — not a reliable HOLLOW';
-            inconclusive.push({ file: rel, line: b.line, name: b.name, why });
-            blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
-          }
-        }
-        else if (oneSidedFns.length) {
-          // Deep-only tier: every gutted fn went red under exactly one sentinel — the test binds one
-          // direction of error. A verdict (counts in scored), never a blocker: only hollow exits 1,
-          // so --deep can clear a sign-accident hollow but can never manufacture a new block.
-          oneSidedBlocks++;
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'one-sided', oneSidedPairs });
-        }
-        else if (anyGutted) {
-          const why = 'mutant ran 0 tests';
-          inconclusive.push({ file: rel, line: b.line, name: b.name, why });
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'inconclusive', why });
-        }
-        else {
-          // 'ungutable' is honest only when at least one eligible entry's body WAS located and gutted but
-          // the compiler rejected the mutant (the gradle compile-fail path above) — the only path that can
-          // currently prove "located but unmutatable". Every other way to land here means no eligible
-          // entry's body was ever located/mutated at all (the ctor-name dead-end, an overload-ambiguous fn,
-          // an unlocatable body) — 'sut-unresolved' is the truthful label (existing plumbing: the
-          // "tested function not locatable" banner, UNVERIFIABLE_REASON_MSG).
-          const why = sawCompileFail ? 'ungutable' : 'sut-unresolved';
-          skipped.push({ file: rel, line: b.line, name: b.name, why });
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why });
-        }
-        // Depth tier (opt-in): a fn the gross stub broke but an IDENTITY stub does not was only exercised on
-        // a fixed point — the assertion does not pin the function's transformation. Advisory, not a finding.
-        // Suppressed for a fn with a production first-param identity branch (`return label`, `?: label`,
-        // `else a`, …): there the stub is indistinguishable from correct behavior and the branch's own
-        // tests survive it BY CONSTRUCTION — field-observed as 5/5 false advisories in one wild run.
-        if (opts.deep) for (const { fn, abs, orig, lang } of brokeFns) {
-          if (hasFirstParamIdentityBranch(orig, fn, lang)) continue;
-          const stub = passthroughBreak(orig, fn, lang);
-          if (stub === null || stub === orig) continue;
-          probes++;
-          writeFileSync(abs, stub);
-          const r = runOne(work, runner, rel, selectName, timeoutMs, selectQualified);
-          writeFileSync(abs, orig);
-          if ((runner === 'gradle' || runner === 'maven') && r.compiled === false) continue; // identity stub didn't type-check → not a weak survivor
-          if (!weakSummary[fn]) weakSummary[fn] = { stubbed: 0, passed: 0 };
-          weakSummary[fn].stubbed++;
-          if (r.failed === 0 && r.passed > 0) { weak.push({ file: rel, line: b.line, name: b.name, fn }); weakSummary[fn].passed++; }
-        }
+      }
+    }
+    // Pass 2 — drain deferred relational fns after every test file's value work is done. Same per-fn
+    // gut code as pass 1 (gutOneFn), but budget-checked PER FN here (pass 1's value loop is
+    // block-granular, unchanged) since pass 2 flattens every deferred block's remaining work into one
+    // queue; once the cap binds, a deferred fn is simply never gutted — no probe, no record (see the
+    // accounting note below).
+    for (const { ctx, deferredRel } of deferredBlocks) {
+      let starved = false;
+      for (const { fn, sutRel, rel: isRel } of deferredRel) {
+        if (probes >= maxProbes || (timeBudgetMs && Date.now() - probeStart >= timeBudgetMs)) { starved = true; break; }
+        gutOneFn(ctx, fn, sutRel, isRel);
+      }
+      if (starved && !ctx.anyGutted) {
+        // Budget-starved accounting (the only new branch — everything else reuses foldBlock verbatim):
+        // this block had no value fns (else ctx.anyGutted would already be true from pass 1) AND its
+        // relational fns never got a chance to run at all — 'sut-unresolved'/'ungutable' would mislabel
+        // an analyzed-but-never-probed block as unlocatable. The honest label is the same one the
+        // pre-baseline probe-cap check already uses.
+        capped++;
+        blockRecords.push({ file: ctx.rel, line: ctx.b.line, name: ctx.b.name, bodyMasked: ctx.bodyMasked, ...ctx.shadowSignals, verdict: 'skipped', why: 'probe-cap' });
+      } else {
+        // Either some fn got gutted (value evidence from pass 1, and/or at least one deferred rel fn
+        // before the cap bound) or every deferred fn was attempted and none needed deferring further
+        // (grossBreak/compile-fail reasons, not budget) — either way, the verbatim fold decides the
+        // verdict. `relStarved` records whether the cap cut this block's rel loop off before every
+        // deferredRel fn got a chance — only reachable here for a caught-locked-in or relational-only
+        // block (the accusation-shaped case above never defers at all), but foldBlock's belt-and-braces
+        // guard reads it regardless, as structural insurance against a future defer-decision change.
+        ctx.relStarved = starved;
+        foldBlock(ctx);
       }
     }
   } finally { rmSync(work, { recursive: true, force: true }); repoLock.release(); }
@@ -2801,6 +3244,7 @@ const UNVERIFIABLE_REASON_MSG = {
   'no-pin': 'only checks a mock / no value pinned',
   'one-sided': 'the binding test detects only one direction of error',
   'pin-unresolved': "pins a value the probe can't tie to a called function",
+  'relation-unbound': "relational oracle — the mutant survived both extremes; the relation doesn't pin a value",
   'sut-unresolved': "can't locate the function from the test's imports",
   'dynamic-title': 'test name is computed at runtime',
   'ungutable': "function body can't be safely mutated",
@@ -2823,6 +3267,32 @@ export function extraHollowOf(r) {
   const changeHollowBlocks = new Set((r.changes || []).filter((c) => c.status === 'hollow' && c.evidence && c.evidence.blocks)
     .flatMap((c) => c.evidence.blocks.map((b) => `${b.file}:${b.line}`)));
   return (r.hollow || []).filter((h) => !changeHollowBlocks.has(`${h.file}:${h.line}`));
+}
+
+// Boundary-blind-spot aggregate — a fold over r.oneSided rows, formatter-only (result shape, JSON,
+// SARIF, exit codes untouched). Groups by the direction the test BINDS: posRed=true → red under the
+// positive sentinel → binds only against too-high results; posRed=false → too-low. 'inline' = one
+// header line (diff + markdown surfaces); 'breakdown' = header + per-direction file counts
+// (full-scan surface, where volume lives). A single row always collapses to the singular inline form.
+export function oneSidedLines(rows, style) {
+  const n = rows.length;
+  if (!n) return [];
+  const hi = rows.filter((o) => o.posRed), lo = rows.filter((o) => !o.posRed);
+  if (n === 1) return [`boundary blind spots: 1 one-sided test — binds only against ${hi.length ? 'too-high' : 'too-low'} results; never a blocker:`];
+  const head = (txt) => `boundary blind spots: ${n} one-sided test(s) — ${txt}; never a blocker:`;
+  if (style === 'breakdown') {
+    const lines = [head('these bind one direction of error only')];
+    for (const [group, label] of [[hi, 'too-high'], [lo, 'too-low']]) {
+      if (!group.length) continue;
+      const perFile = new Map();
+      for (const o of group) perFile.set(o.file, (perFile.get(o.file) || 0) + 1);
+      const files = [...perFile.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+      lines.push(`  bind only against ${label} results (${group.length}): ${files.map(([f, c]) => `${f} (${c})`).join(', ')}`);
+    }
+    return lines;
+  }
+  if (!hi.length || !lo.length) return [head(`all bind only against ${hi.length ? 'too-high' : 'too-low'} results`)];
+  return [head(`${hi.length} bind${hi.length === 1 ? 's' : ''} only against too-high results, ${lo.length} only against too-low`)];
 }
 
 // Full-suite human report (no diff scope — r.changeSummary is null). Pinned byte-for-byte by the
@@ -2895,7 +3365,7 @@ function formatFullScanReport(r) {
   // (threshold/comparison oracles). A verdict, never a blocker; each row states the two observed runs.
   if (r.oneSided && r.oneSided.length) {
     lines.push('');
-    lines.push('one-sided: tests that bind exactly one direction of error — red under one extreme sentinel, green under the other; never a blocker:');
+    lines.push(...oneSidedLines(r.oneSided, 'breakdown'));
     for (const o of r.oneSided) lines.push(`  ~ ${o.file}:${o.line}  '${o.name}'  — ${o.fn}() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
   }
   // Side signals: two existing inconclusive buckets that were silent in the report — a flaky test
@@ -3030,7 +3500,7 @@ function formatDiffReport(r) {
   // One-sided tier (--deep): see formatFullScanReport's comment — same tier, same rows.
   if (r.oneSided && r.oneSided.length) {
     lines.push('');
-    lines.push('one-sided: tests that bind exactly one direction of error — red under one extreme sentinel, green under the other; never a blocker:');
+    lines.push(...oneSidedLines(r.oneSided, 'inline'));
     for (const o of r.oneSided) lines.push(`  ~ ${o.file}:${o.line}  '${o.name}'  — ${o.fn}() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
   }
   // Side signals (flaky rerun instability / title collision) — see formatFullScanReport's comment.

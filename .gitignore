@@ -20,3 +20,6 @@ benchmark/
 test/fixtures/jvm-project/.gradle/
 test/fixtures/jvm-project/build/
 test/fixtures/jvm-project/**/build/
+test/fixtures/maven-project/target/
+test/fixtures/maven-reactor/target/
+test/fixtures/maven-reactor/**/target/

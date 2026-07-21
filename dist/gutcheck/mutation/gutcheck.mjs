@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { prove, formatReport, parseBlocks, RUNNERS, extraHollowOf } from './prove.mjs';
+import { prove, formatReport, parseBlocks, RUNNERS, extraHollowOf, oneSidedLines } from './prove.mjs';
 import { selfCheck } from './selfcheck.mjs';
 import { configForProject } from '../checker/standalone.mjs';
 import { runChecker } from '../checker/core.mjs';
@@ -54,6 +54,7 @@ const SKIP_LABELS = new Map([
   ['instrumented-test', 'instrumented androidTest (not supported)'],
   ['unsupported-source-set', 'unsupported KMP source set'],
   ['pin-unresolved', 'pin not tied to a called function'],
+  ['relation-unbound', 'relational oracle (direction-only) — can\'t pin a value'],
   ['probe-cap', 'not probed (cap/time budget)'],
   ['env-abort', 'not probed (env abort)'],
 ]);
@@ -216,15 +217,15 @@ export function formatMarkdown(r) {
     lines.push('');
     lines.push('_May cover only fixed points — no-op tests pass identity stubs by design._');
   }
-  // One-sided tier (--deep) — mirrors formatReport's human variant: tests red under exactly one
-  // sentinel bind one direction of error. A verdict, never a blocker.
+  // Boundary-blind-spot aggregate over the one-sided tier — mirrors the diff surface's inline
+  // headline (period form: the heading opens the section, the sentence closes it). Rows unchanged.
   if (r.oneSided && r.oneSided.length) {
     lines.push('');
-    lines.push('#### One-sided');
+    lines.push('#### Boundary blind spots');
+    lines.push('');
+    lines.push(oneSidedLines(r.oneSided, 'inline')[0].replace(/:$/, '.'));
     lines.push('');
     for (const o of r.oneSided) lines.push(`- ${o.file}:${o.line} '${o.name}' — \`${o.fn}\`() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
-    lines.push('');
-    lines.push('_Binds exactly one direction of error (a threshold/comparison oracle) — never a blocker._');
   }
   if (r.caught > 0) {
     lines.push('');

@@ -1240,3 +1240,33 @@ test('x', () => { assert.strictEqual(new Service().decrypt(), 99); });
   const absTest = abs(d, 'test/service.test.mjs');
   assert.deepEqual(jsInstanceSuts(body, testCode, absTest, srcFiles, importMap(testCode), d), []);
 });
+
+// ---- Task 6: per-kind crediting (mirrors jvmInstanceSuts) — a relational-only fragment's instance
+// credit carries `rel: true`; a value fragment's instance credit omits the key entirely (never `false`),
+// so every pre-existing (value-only) caller's `{fn, sutRel}` shape stays byte-identical. ----
+const CALC_SRC = `export class Calc {
+  add(a, b) { return a + b; }
+  mul(a, b) { return a * b; }
+}
+`;
+test('instance credit from a relational-only fragment carries rel: true; value fragment credit does not', () => {
+  const d = project({ 'src/calc.mjs': CALC_SRC });
+  const testCode = `import { Calc } from '../src/calc.mjs';
+test('t', () => {
+  const svc = new Calc();
+  expect(svc.add(1, 2)).toBeGreaterThan(0);
+  expect(svc.mul(2, 3)).toBe(6);
+});
+`;
+  const body = `  const svc = new Calc();
+  expect(svc.add(1, 2)).toBeGreaterThan(0);
+  expect(svc.mul(2, 3)).toBe(6);
+`;
+  const srcFiles = [abs(d, 'src/calc.mjs')];
+  const absTest = abs(d, 'test/calc.test.mjs');
+  const out = jsInstanceSuts(body, testCode, absTest, srcFiles, importMap(testCode), d);
+  const add = out.find((x) => x.fn === 'add');
+  const mul = out.find((x) => x.fn === 'mul');
+  assert.equal(add && add.rel, true);
+  assert.ok(mul && !mul.rel);
+});

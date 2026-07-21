@@ -125,6 +125,10 @@ test('PROVE --deep: verdicts are a function of both sentinel runs — sign-indep
     assert.match(report, /'high reading passes'.*red under the positive sentinel, passes under the negative one/);
     assert.match(report, /'low reading fails'.*passes under the positive sentinel, red under the negative one/);
     assert.match(report, /'echo'.*survives gutting echoSum\(\)(?!.*sentinel)/);
+    // Aggregate header over the same rows (spec: boundary-blind-spot aggregate) — real engine output.
+    assert.match(report, /^boundary blind spots: 2 one-sided test\(s\) — these bind one direction of error only; never a blocker:$/m);
+    assert.match(report, /^ {2}bind only against too-high results \(1\): \S+ \(1\)$/m);
+    assert.match(report, /^ {2}bind only against too-low results \(1\): \S+ \(1\)$/m);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

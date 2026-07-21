@@ -4,6 +4,37 @@ All notable changes to Gutcheck are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-21
+
+- Relational assertions are probe-eligible with asymmetric verdicting—`assert.ok(a > b)`,
+  jest/vitest `toBeGreaterThan`-family, chai `.above`/`.least`-family, JUnit/kotlin.test
+  `assertTrue(a > b)` (paren and trailing-lambda forms), AssertJ `isGreaterThan`-family, pytest
+  `assert a > b`, and unittest `assertGreater`-family. A red mutant proves the test binds; a mutant
+  that survives both extremes reports the new `relation-unbound` unverifiable reason—a relational
+  test can be proven or one-sided but can never be accused of being hollow, and exit codes never
+  change on runs without relational asserts.
+- Kotlin reach: a receiver'd object/singleton call at the head of a test expression now credits its
+  method—`val x = Modes.speedOfSound(...)` binds `speedOfSound`. Import-gated (the capitalized
+  receiver must be imported by the test) and head-anchored.
+- Boundary-blind-spot aggregate: the one-sided tier now leads with a summary of which direction
+  each threshold test binds—split counts on the diff report and PR comment, a per-direction file
+  breakdown on the full-scan report (field feedback). Report-only; verdicts, exit codes, and
+  `--json` are unchanged.
+- Under a probe cap, blocks with value-pinning assertions are probed before relational-only blocks,
+  so stronger evidence is never displaced by direction-only evidence.
+- Fixed: on Node 23+ the probe read every `node --test` run as 0 passed/0 failed—Node flipped the default
+  test reporter from tap to spec (`ℹ pass 1` rather than `# pass 1`), which the count parser couldn't read,
+  so the startup self-check failed and gutcheck refused to run (the Stop-hook gate then fell silently open).
+  The node runner now pins `--test-reporter=tap`, matching the mocha/ava branches; a Node 24 CI leg guards
+  the reporter format (#4).
+- Fixed: Gradle false-hollow hardening (field report 2026-07-18). A daemon vfs-watch race could miss the
+  probe's out-of-band mutant write, leaving the main compile up-to-date so the test reran against stale
+  classes—a fresh-green read then minted a false `hollow`; the gradle probe now runs
+  `-Dorg.gradle.vfs.watch=false` and trusts a survivor as evidence only when the mutant was actually
+  compiled in that run (last-compiled content match). Compile-task detection also scopes its `test`-name
+  exclusion to the segment after the last colon, so a module path with a `test`-shaped segment no longer
+  hides the real compile task.
+
 ## [0.3.2] — 2026-07-15
 
 - The CI markdown surface (sticky PR comment, job summary) carries the probe mechanics — probed

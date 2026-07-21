@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, readFileSync, chmodSync, realpathSync, existsSync } from 'node:fs';
-import { execSync, execFileSync } from 'node:child_process';
+import { execSync, execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -397,9 +397,35 @@ test('testCmdFor: the qualified flag is a no-op for vitest/jest/ava — only moc
   assert.deepEqual(testCmdFor('ava', 't.js', 'a b', REPO_ROOT, false).args.slice(1), avaArgs);
 });
 test('testCmdFor: node is unconditionally anchored regardless of the qualified flag (it has no branch for it)', () => {
-  const expected = { cmd: 'node', args: ['--test', '--test-name-pattern', '^' + reEscForTest('a b') + '$', 't.js'] };
+  const expected = { cmd: 'node', args: ['--test', '--test-reporter=tap', '--test-name-pattern', '^' + reEscForTest('a b') + '$', 't.js'] };
   assert.deepEqual(testCmdFor('node', 't.js', 'a b'), expected);
   assert.deepEqual(testCmdFor('node', 't.js', 'a b', process.cwd(), true), expected);
+});
+test('testCmdFor: node pins the tap reporter so parseRun reads counts on Node >=23 (default reporter flipped tap->spec, issue #4)', () => {
+  // On Node >=23 `node --test` defaults to the spec reporter (`ℹ pass 1`, even non-TTY), which parseRun's
+  // TAP regex (/# pass N/) cannot read — so every node-runner verdict parses 0p/0f, the self-check's
+  // planted sound test is never caught, and gutcheck refuses to run (the Stop gate then fails open).
+  // Pinning tap forces the format parseRun expects on every supported Node (>=20), mirroring how the
+  // mocha (--reporter tap) and ava (--tap) branches already pin theirs.
+  const { args } = testCmdFor('node', 't.js', 'a b');
+  assert.ok(args.includes('--test-reporter=tap'), `node args must pin --test-reporter=tap; got ${JSON.stringify(args)}`);
+});
+test('parseRun reads Node\'s tap reporter but not its spec reporter — the reason the node branch must pin tap (issue #4)', () => {
+  // Reproduction on the running Node, version-independent (both reporters forced explicitly): the spec
+  // reporter (Node >=23's default, even non-TTY) prints `ℹ pass 1`, which parseRun's TAP regex can't read
+  // -> {0,0}; tap prints `# pass 1` and reads correctly. This is exactly why testCmdFor pins tap.
+  const d = project({ 'package.json': '{"type":"module"}',
+    's.test.mjs': "import { test } from 'node:test'; import assert from 'node:assert';\n" +
+      "test('planted sound', () => { assert.strictEqual(1 + 1, 2); });\n" });
+  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT; // engine scrubs this too, so a nested node --test runs (prove.mjs runOne)
+  const run = (reporter) => {
+    const r = spawnSync('node', ['--test', `--test-reporter=${reporter}`, '--test-name-pattern=^planted sound$', join(d, 's.test.mjs')], { encoding: 'utf8', env });
+    return (r.stdout || '') + (r.stderr || '');
+  };
+  try {
+    assert.deepEqual(parseRun('node', run('spec')), { passed: 0, failed: 0 }); // the issue-#4 failure mode
+    assert.equal(parseRun('node', run('tap')).passed, 1);                       // what the pin restores
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 test('testCmdFor: an unresolvable bin falls back to the previous npx form on non-win32 (args unchanged)', { skip: process.platform === 'win32' }, () => {
   const empty = mkdtempSync(join(tmpdir(), 'sk-noresolve-'));
@@ -577,6 +603,11 @@ test('testCmdFor gradle: java-wrapper argv, no shell, offline', () => {
   assert.ok(args.includes(':app:cleanTestDebugUnitTest') && args.includes(':app:testDebugUnitTest'));
   assert.ok(args.includes('--tests') && args.includes('demo.CalcTest.testAdd'));
   assert.ok(args.includes('--offline') && args.includes('--console=plain'));
+  // NOT --build-cache (field report 2026-07-18: removed — its location-independent, content-addressable
+  // reuse let a repeat probe invocation on an unchanged diff read a genuine survivor back as 'ungutable',
+  // indistinguishable from the vfs-watch race mainCompileExecuted gates on). Regression guard: this flag
+  // must never come back without also solving that cross-invocation collision.
+  assert.ok(!args.includes('--build-cache'), `--build-cache must stay OUT of the gradle argv: ${JSON.stringify(args)}`);
   assert.ok(!args.some((a) => /gradlew/.test(a)));   // never the .bat/.sh script
 });
 // ---- resolveRunnerBin: fixture-driven unit coverage of every bin-field shape + the walk-up + the miss ----

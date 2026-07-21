@@ -4,7 +4,7 @@
 # Two independent modes on argv:
 #   1. `py_blocks.py <test.py>` — emits, on stdout, JSON:
 #        {"imports": [{"local","module","level"}...],
-#         "blocks": [{"name","line","endline","calls","pins","inst"}...]}
+#         "blocks": [{"name","line","endline","calls","pins","relPins","inst"}...]}
 #   2. `py_blocks.py --member <src.py> <ClassName> <method>` — emits {"ok": true|false}: the SUT-side ast
 #      validation for instance-receiver crediting (see resolvePyClassMember in mutation/prove.mjs). Any
 #      parse error, any check failing, any exotic node -> {"ok": false} (fail-closed).
@@ -21,6 +21,16 @@
 # (return 987654321) reliably FAILS: unittest's assertEqual family, or a bare `assert a == b`. Inequality
 # / ordering / identity / membership compares (`!=`, `<`, `>`, `is`, `in`) are NOT pinned — the sentinel
 # could pass them, which would be a false HOLLOW. Zero new dependency: stdlib ast/json/sys only.
+#
+# `relPins` (relational-assert reach, spec Feature 2 §1 + plan addendum): a SEPARATE, weaker crediting
+# vocabulary — unittest's assertGreater/assertGreaterEqual/assertLess/assertLessEqual, or a bare
+# `assert a > b` (any of `>`, `>=`, `<`, `<=`, chained). These can PROVE (mutant red on one sentinel
+# direction) but never CONVICT — prove.mjs's pinDetail arm routes a relPins-only fn to relation-unbound on
+# survival, never hollow. Deduped against `pins`: a fn credited by BOTH stays value-class (appears only in
+# `pins`) — `relPins` reports strictly the relational-ONLY names. `pin_calls_in`'s Name-only instance-credit
+# exclusion is deliberately NOT mirrored here with `raw_insts`/`inst` collection for relational contexts:
+# instance credit stays value-only on the ast path (the fail-safe direction — under-crediting a receiver'd
+# relational call only costs reach, never risks a false hollow).
 #
 # `inst` (new, T4, docs/plans/2026-07-09-inline-receiver-crediting.md): receiver'd instance calls in the
 # SAME pin contexts `pin_calls_in` scans — `Calc().add(2,3)` (inline) and `c = Calc(); c.add(2,3)`
@@ -42,6 +52,11 @@ import ast, json, sys
 PIN = {'assertEqual', 'assertAlmostEqual',
        'assertListEqual', 'assertDictEqual', 'assertSequenceEqual',
        'assertTupleEqual', 'assertSetEqual', 'assertMultiLineEqual', 'assertCountEqual'}
+
+# Relational (direction-only) assert methods — SAFE-form vocabulary (spec Feature 2 §1 + plan addendum):
+# these can prove (mutant red) but never convict; prove.mjs routes their survivors to relation-unbound.
+REL_PIN = {'assertGreater', 'assertGreaterEqual', 'assertLess', 'assertLessEqual'}
+REL_OPS = (ast.Gt, ast.GtE, ast.Lt, ast.LtE)
 
 # unittest.mock / mock / pytest_mock module names that taint the WHOLE file (mirrors prove.mjs's JS
 # MOCK_TAINT gate's deliberate coarseness — a partial-mock spec can hide behind an otherwise-innocent call
@@ -290,6 +305,7 @@ def main(path):
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith('test')]:
         pins = []
         raw_insts = []
+        rel_pins = []
         for n in ast.walk(fn):
             if isinstance(n, ast.Call) and callee(n) in PIN:
                 for a in n.args:
@@ -303,6 +319,15 @@ def main(path):
                 for c in n.test.comparators:
                     pins += pin_calls_in(c)
                     raw_insts += inst_calls_in(c)
+            if isinstance(n, ast.Call) and callee(n) in REL_PIN:
+                for a in n.args:
+                    rel_pins += pin_calls_in(a)
+            # bare `assert a > b` (or chained `0 < x < 10`): relational ops only — `==` stays in pins above.
+            if isinstance(n, ast.Assert) and isinstance(n.test, ast.Compare) \
+                    and n.test.ops and all(isinstance(op, REL_OPS) for op in n.test.ops):
+                rel_pins += pin_calls_in(n.test.left)
+                for c in n.test.comparators:
+                    rel_pins += pin_calls_in(c)
 
         inst_set = set()
         if not mock_taint:
@@ -318,6 +343,7 @@ def main(path):
             'endline': getattr(fn, 'end_lineno', fn.lineno),
             'calls': sorted(set(calls_in(fn))),
             'pins': sorted(set(pins)),
+            'relPins': sorted(set(rel_pins) - set(pins)),
             'inst': [{'ctor': c, 'method': m} for c, m in sorted(inst_set)],
         })
 

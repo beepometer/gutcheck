@@ -17,8 +17,9 @@ Every change must pass:
   This is Gutcheck's own self-check and runs in CI on every push.
 - **`npm run build:plugin`** — must rebuild `dist/gutcheck` byte-identically (running it twice leaves
   `git status` clean).
-- Dogfood the probe: `node mutation/gutcheck.mjs .` should report **0 hollow** on this repo. If it
-  flags one of our tests, fix the test — that is the product working.
+- Dogfood the probe: `node mutation/gutcheck.mjs . --max-probes=2000` should report **0 hollow** on this
+  repo (the flag overrides the default cap of 40 so every function is covered). If it flags one of our
+  tests, fix the test — that is the product working.
 
 ## Editing a skill or agent
 

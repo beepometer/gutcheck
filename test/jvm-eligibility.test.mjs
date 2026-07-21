@@ -427,3 +427,146 @@ test('eligibleFnsDetail: a weak-only body has no pin at all — hadPin false (no
   assert.deepEqual(d.eligible, []);
   assert.equal(d.hadPin, false);
 });
+
+// === JVM relational vocabulary (Task 4, RED-first) ================================================
+// assertTrue/assertFalse over a top-level comparison, AssertJ's directional matchers, and the kotlin.test
+// trailing-lambda assertTrue/assertFalse { … } form all land in the RELATIONAL kind (never value) —
+// provable (mutant red) but never able to convict (survive → hollow), same asymmetry as the JS/pytest
+// relational vocabulary. The pre-existing plain-truthiness exclusion (assertTrue(isPositive(5))) must
+// hold untouched: it has no top-level comparator, so it stays out of BOTH kinds.
+
+test('relational: assertTrue with a top-level comparison is relational-eligible (kotlin)', () => {
+  const body = `assertTrue(computeScore(x) > threshold(y))`;
+  const d = eligibleFnsDetail(body, ['computeScore', 'threshold'], new Map(), 'kotlin');
+  assert.deepEqual([...d.eligible].sort(), ['computeScore', 'threshold']);
+  assert.deepEqual([...d.relationalOnly].sort(), ['computeScore', 'threshold']);
+});
+
+test('relational: plain truthiness assertTrue stays out — the pre-existing weak-matcher oracle holds', () => {
+  const d = eligibleFnsDetail(`assertTrue(isPositive(5))`, ['isPositive'], new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+test('relational: kotlin.test trailing-lambda assertTrue { a > b } is relational-eligible', () => {
+  const d = eligibleFnsDetail(`assertTrue { computeScore(x) > 0 }`, ['computeScore'], new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, ['computeScore']);
+  assert.deepEqual(d.relationalOnly, ['computeScore']);
+});
+
+test('relational: AssertJ isGreaterThan pushes both actual and expected sides (java)', () => {
+  const d = eligibleFnsDetail(`assertThat(computeScore(x)).isGreaterThan(floor(y));`, ['computeScore', 'floor'], new Map(), 'java');
+  assert.deepEqual([...d.eligible].sort(), ['computeScore', 'floor'].sort());
+  assert.deepEqual([...d.relationalOnly].sort(), ['computeScore', 'floor'].sort());
+});
+
+test('relational: assertFalse comparison form is admitted; boolean-joined arg is not', () => {
+  const rel = eligibleFnsDetail(`assertFalse(computeScore(x) <= 0)`, ['computeScore'], new Map(), 'kotlin');
+  assert.deepEqual(rel.relationalOnly, ['computeScore']);
+  const joined = eligibleFnsDetail(`assertTrue(a(x) > 0 && b(x) > 0)`, ['a', 'b'], new Map(), 'kotlin');
+  assert.deepEqual(joined.eligible, []);
+});
+
+// === Kotlin val-hop: receiver'd object/singleton call reach (field report #3, RED-first) =========
+// The val-hop's kotlinLeadingCall only credits a BARE lowercase head (`val x = foo(...)`); a receiver'd
+// object/singleton head (`val x = Modes.speedOfSound(...)`) — the DOMINANT idiom in a Kotlin codebase
+// built from `object Foo { fun bar() }` singletons — fell through to `pin-unresolved`, even though the
+// direct/inline sibling shape (`assertEquals(exp, Modes.speedOfSound(...))`) already reaches fine (path 1,
+// substring crediting). Fixed via kotlinReceiverCall: credit the head `Receiver.method(` ONLY when
+// Receiver is Uppercase AND present in the test file's import map (an imported object/class/companion —
+// never a local/param/mock var, never a same-package type with no import line). Oracles hand-derived from
+// the report's reproduction (AcoustiQ StiEstimateTest/DspModuleTest) and the regex's own documented shape
+// — never pinned from the code's own output.
+
+test("kotlin val-hop credits a receiver'd object call: val c = Modes.speedOfSound(...) (was pin-unresolved)", () => {
+  const body = 'val c = Modes.speedOfSound(20f, 0f)\n    assertEquals(343.359f, c, 0.05f)';
+  const imports = new Map([['Modes', 'com.roomacoustics.audio.Modes']]);
+  const d = eligibleFnsDetail(body, ['speedOfSound'], imports, 'kotlin');
+  assert.deepEqual(d.eligible, ['speedOfSound']);
+});
+
+test("kotlin val-hop, relational: two receiver'd vals compared by assertTrue credit the fn as relationalOnly (never value)", () => {
+  const body = 'val a = Foo.score(x)\n    val b = Foo.score(y)\n    assertTrue(a > b)';
+  const imports = new Map([['Foo', 'com.acme.Foo']]);
+  const d = eligibleFnsDetail(body, ['score'], imports, 'kotlin');
+  assert.deepEqual(d.eligible, ['score']);
+  assert.deepEqual(d.relationalOnly, ['score'], 'must land in relationalOnly — preserves the can-prove-never-convict asymmetry');
+  assert.equal(d.hadValuePin, false, 'no value pin exists here, only the relational one');
+});
+
+test('kotlin val-hop, must-NOT-credit: a LOCAL (non-imported) lowercase receiver stays uncredited', () => {
+  const body = 'val x = repo.find(id)\n    assertEquals(exp, x)';
+  const d = eligibleFnsDetail(body, ['find'], new Map(), 'kotlin'); // repo is not in imports at all
+  assert.deepEqual(d.eligible, []);
+});
+
+test('kotlin val-hop, must-NOT-credit: an elvis-embedded receiver call is a dead branch (^ anchor rejects; head is `cond`)', () => {
+  const body = 'val x = cond ?: Foo.bar()\n    assertEquals(exp, x)';
+  const imports = new Map([['Foo', 'com.acme.Foo']]);
+  const d = eligibleFnsDetail(body, ['bar'], imports, 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+test('kotlin val-hop, must-NOT-credit: an if/else-embedded receiver call is a dead branch (head is `if`)', () => {
+  const body = 'val x = if (c) Foo.a() else Foo.b()\n    assertEquals(exp, x)';
+  const imports = new Map([['Foo', 'com.acme.Foo']]);
+  const d = eligibleFnsDetail(body, ['a', 'b'], imports, 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+// Ruling 5 (deliberate under-reach, controller-decided): the import gate IS the moat — a same-package
+// receiver'd call with NO import line for it (imports.has(receiver) false) stays uncredited, exactly like
+// an un-imported bare call already does elsewhere. This is the same shape as the must-credit fixture
+// above, with the import binding removed — isolates the import-gate itself as the deciding factor.
+test('kotlin val-hop, deliberate under-reach: an Uppercase receiver NOT in the import map stays uncredited (same-package, no import line)', () => {
+  const body = 'val c = Modes.speedOfSound(20f, 0f)\n    assertEquals(343.359f, c, 0.05f)';
+  const d = eligibleFnsDetail(body, ['speedOfSound'], new Map(), 'kotlin'); // Modes deliberately absent from imports
+  assert.deepEqual(d.eligible, []);
+});
+
+// Ruling 1 (controller-decided, chained/nested receivers OUT of scope): kotlinReceiverCall is a SINGLE
+// hop anchored at `^` — for `A.b().c(1)` the regex's head match is `A.b(` (group1=A, group2=b); `c` is
+// never in that match at all, so it can NEVER be credited via this hop regardless of what candidateFns
+// contains. Pinned with candidateFns=['c'] ONLY (b deliberately excluded) so the assertion isolates
+// exactly that invariant — not an accidental side effect of b also being absent.
+test("kotlin val-hop, chained receiver A.b().c(...) — single hop only: 'c' is NEVER credited (out of scope)", () => {
+  const body = 'val x = A.b().c(1)\n    assertEquals(exp, x)';
+  const imports = new Map([['A', 'com.acme.A']]);
+  const d = eligibleFnsDetail(body, ['c'], imports, 'kotlin');
+  assert.deepEqual(d.eligible, [], "'c' (the second hop) must never be credited — chained receivers are single-hop only");
+});
+
+// Documents the OTHER half of ruling 1's safety argument: the first hop (`b`, from `A.b(`) IS credited
+// when `b` itself is a candidate fn — accepted per the report's head-anchor argument (`A.b()` is always-
+// evaluated, no dead branch, so gutting `b` genuinely changes the chain's result whenever the chain isn't
+// value-absorbing) — the SAME acceptance already implicit in path 1's plain substring crediting of a
+// nested call. This is a demonstration of accepted behavior, not a must-NOT-credit guard.
+test("kotlin val-hop, chained receiver A.b().c(...): the FIRST hop 'b' IS credited when it is itself a candidate (accepted, documents ruling 1)", () => {
+  const body = 'val x = A.b().c(1)\n    assertEquals(exp, x)';
+  const imports = new Map([['A', 'com.acme.A']]);
+  const d = eligibleFnsDetail(body, ['b'], imports, 'kotlin');
+  assert.deepEqual(d.eligible, ['b']);
+});
+
+// Ruling 2 (controller-decided): a companion/nested-object receiver (`Outer.Inner.method(...)`) must fall
+// through with NO credit. `imports.has('Outer')` may hold, but the regex's second group requires a
+// LOWERCASE-initial token immediately after the first dot — `Inner` is Uppercase, so the whole `^`-anchored
+// match fails outright (no backtracking finds a later dot to retry against) → kotlinReceiverCall returns
+// null → safe under-reach, exactly as the report predicted.
+test("kotlin val-hop, nested/companion receiver Outer.Inner.method(...) falls through — no credit", () => {
+  const body = 'val x = Outer.Inner.method(1)\n    assertEquals(exp, x)';
+  const imports = new Map([['Outer', 'com.acme.Outer']]);
+  const d = eligibleFnsDetail(body, ['method'], imports, 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+// Ruling 4 (controller-decided, out of scope this pass): the receiver'd val-hop is KOTLIN-GATED ONLY,
+// exactly like the pre-existing val-hop it extends — a Java `var` binding to the SAME shape must stay
+// uncredited. (Java's shared JS-style const/let/var hop already excludes a dotted receiver via
+// topLevelCallees, independent of this fix — this pins that the NEW kotlinReceiverCall path specifically
+// never runs for lang: 'java'.)
+test("kotlin val-hop, Java analogue is OUT of scope (evaluated-surface decision): java 'var' binding to a receiver'd call stays uncredited", () => {
+  const body = 'var c = Modes.speedOfSound(20f, 0f);\n    assertEquals(343.359f, c, 0.05f);';
+  const imports = new Map([['Modes', 'com.roomacoustics.audio.Modes']]);
+  const d = eligibleFnsDetail(body, ['speedOfSound'], imports, 'java');
+  assert.deepEqual(d.eligible, []);
+});

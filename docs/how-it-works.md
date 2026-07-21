@@ -47,8 +47,8 @@ runs inline; untested is a reference scan that found nothing to cite.
 |---|---|---|
 | proven | a test fails when this function breaks | the function was gutted, its test was rerun, the test failed |
 | hollow | a test covers it but cannot detect it breaking | same probe, confirmed: the test passed over the gutted function AND over the opposite-signed gut — never a sign accident |
-| one-sided | the test binds one direction of error (a threshold-style oracle); never a blocker | the test went red under exactly one of the two opposite-signed guts |
-| unverifiable | tests reference it, but the probe could not verify any of them — a limit of the probe, not proof the tests are weak | no value-pinning assertion, the function cannot be located from the test's imports, or the referencing test is itself inconclusive; each test's reason is in the JSON, the dominant one in the report |
+| one-sided | the test binds one direction of error (a threshold-style oracle, or a relation-only assert like `a > b`); never a blocker | the test went red under exactly one of the two opposite-signed guts |
+| unverifiable | tests reference it, but the probe could not verify any of them — a limit of the probe, not proof the tests are weak | no value-pinning assertion, the function cannot be located from the test's imports, a relational-only test whose mutant survives both extreme sentinels (`relation-unbound`), or the referencing test is itself inconclusive; each test's reason is in the JSON, the dominant one in the report |
 | untested | no test mentions it | reference scan over the test files in scope |
 
 `proven` means the tests bind the function, not that the code is correct: a test can pin a wrong

@@ -8,7 +8,9 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node: ['20', '22']
+        # '24' exercises the Node >=23 default-reporter flip (tap->spec): the probe pins --test-reporter=tap
+        # so parseRun stays readable, but only a >=23 leg guards against that regressing (issue #4).
+        node: ['20', '22', '24']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

@@ -39,7 +39,7 @@ Every changed function takes one path through the probe:
 |---|---|---|
 | proven | the function was gutted, its test was rerun, the test failed | no |
 | hollow | the test passed over the gutted function, confirmed with an opposite-signed wrong value before it is ever reported, so the accusation is never a sign accident | **yes** |
-| one-sided | the test goes red under one wrong value but not the other, it binds one direction of error (a threshold-style oracle) | no |
+| one-sided | the test goes red under one wrong value but not the other, it binds one direction of error (a threshold-style oracle, or a relation-only assert like `a > b`) | no |
 | unverifiable | tests reference it, but the probe could not verify any of them: a limit of the probe, not proof the tests are weak | no |
 | untested | no test mentions it | no |
 
@@ -197,7 +197,7 @@ Every flag, the exit-code contract (0 clean · 1 hollow found · 2 usage error),
 
 - mock-, dependency-injection-, and UI-heavy code: few functions are probeable, so the report's
   value is the untested/unverifiable denominator rather than proven/hollow verdicts
-- suites that assert relations or behavior without ever pinning a value
+- suites that assert behavior without ever pinning a value or a comparison (relation-only asserts like `a > b` are probe-eligible now: proven, one-sided, or unverifiable, never hollow)
 - instrumented Android tests (`androidTest`) and Kotlin Multiplatform native/JS targets—
 unsupported, reported as such rather than guessed
 

@@ -5,7 +5,7 @@ import { join, dirname, resolve } from 'node:path';
 import { cpSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { runOne, javaExe, prove, gradleTaskInfo } from '../mutation/prove.mjs';
+import { runOne, javaExe, prove, gradleTaskInfo, mainCompileExecuted } from '../mutation/prove.mjs';
 import { grossBreak } from '../mutation/probe.mjs';
 
 const GUT = resolve('mutation/gutcheck.mjs');
@@ -61,6 +61,81 @@ test('gradle e2e: compile-failing mutant → compiled=false, no fresh XML (ungut
   } finally { rmSync(w, { recursive: true, force: true }); }
 });
 
+// Stale-build gate (field report 2026-07-18, the false-positive HOLLOW on AcoustiQ): the established
+// root cause is a gradle daemon vfs-watch race — the probe's out-of-band mutant write can be missed by
+// the daemon's file-system watcher, so the main-source compile task goes UP-TO-DATE despite changed
+// source, the test reruns against STALE (unmutated) classes, and the resulting fresh-green XML is
+// misread as a survivor. That race is environmental/daemon-state-dependent and can't be forced on
+// demand — but it has one deterministic, non-racy stand-in with the IDENTICAL observable console shape:
+// running the exact same mutant content twice in a row against the SAME work directory. The first run
+// genuinely executes (bare compile line); Gradle's own incremental build then correctly — not racily —
+// reports every main-source compile task UP-TO-DATE on the second run of that unchanged content, while
+// `cleanTest` still forces `test` to re-execute and reproduce the same green result. mainCompileExecuted
+// can't tell "correctly reused" apart from "raced" (that's the whole point of failing closed on the
+// shape) — this proves the HELPER classifies real gradle output correctly, at the runOne level.
+//
+// This does NOT drive the scenario through prove()'s own gutOneFn/foldBlock: prove() copies its target
+// into a FRESH internal work directory on every call (a different absolute path each time), and with
+// --build-cache deliberately removed (see testCmdFor's own header comment — it made the race's failure
+// mode WORSE by reusing output across separate directories), there is no remaining deterministic way to
+// make prove()'s own internal, never-before-seen work copy read back a stale-shaped result on demand —
+// only the actual (non-reproducible) race can do that now. That absence is exactly the point: it also
+// means ordinary repeat probing (rerun gutcheck on an unchanged diff, a function covered by two test
+// methods) can no longer manufacture a false stale reading either — see test/prove.test.mjs's argv test
+// and the "prove() gradle e2e: fixture verdicts" / "relational one-sided tier" tests below, which cover
+// the companion lastCompiled per-file memo (a function legitimately gutted twice in ONE run, e.g.
+// Meter.reading via both testMeterReading and testMeterEcho, or Score.score via testScoreBound and
+// testScoreOneSided, must still verdict correctly — those tests regressed without the memo during
+// development of this fix, so they stand as this fix's fold-level regression coverage). The wiring is
+// the pure `survivorEvidenceValid(r, sutRel, content, lastCompiled)` helper (unit-tested in
+// test/stale-build.test.mjs) applied one line below the existing (already fold-tested)
+// `r.compiled===false` veto.
+test('gradle e2e: mainCompileExecuted correctly reads a genuinely reused (stale-shaped) gradle result as unproven, on real console output', opts, () => {
+  const w = workCopy();
+  try {
+    const marker = `stale_gate_probe_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    writeFileSync(join(w, 'src/main/kotlin/StaleGate.kt'), [
+      'package demo', `// ${marker} — guarantees this exact file content was never built before`, '',
+      'fun staleGateFn(n: Int): Int = n', '',
+    ].join('\n'));
+    writeFileSync(join(w, 'src/test/kotlin/StaleGateTest.kt'), [
+      'package demo', '',
+      'import org.junit.jupiter.api.Test',
+      'import org.junit.jupiter.api.Assertions.assertEquals', '',
+      'class StaleGateTest {',
+      '    // Echo-oracle by construction (pins staleGateFn against ITSELF, never a fixed expected value):',
+      '    // any mutant survives this — a real hollow-shaped candidate for the reused-build leg below.',
+      '    @Test fun testStaleGateEcho() {',
+      '        val e = staleGateFn(11)',
+      '        assertEquals(e, staleGateFn(11))',
+      '    }',
+      '}', '',
+    ].join('\n'));
+
+    const sutFile = join(w, 'src/main/kotlin/StaleGate.kt');
+    const sutOrig = readFileSync(sutFile, 'utf8');
+    const broken = grossBreak(sutOrig, 'staleGateFn', 'kotlin');
+    assert.ok(broken && broken !== sutOrig, 'grossBreak must locate and mutate staleGateFn');
+    writeFileSync(sutFile, broken);
+
+    // FIRST run: a genuinely fresh compile of NOVEL content (the marker guarantees this exact byte
+    // content was never built before, on any machine) — real bare-line evidence, real survivor.
+    const first = runOne(w, 'gradle', 'src/test/kotlin/StaleGateTest.kt', 'demo.StaleGateTest.testStaleGateEcho', 180000);
+    assert.equal(first.compiled, true, `first run should compile:\n${first.out.slice(-3000)}`);
+    assert.ok(first.passed > 0 && first.failed === 0, `first run's mutant must genuinely survive (echo-oracle): ${JSON.stringify({ passed: first.passed, failed: first.failed })}`);
+    assert.ok(mainCompileExecuted(first.out), `first run must show a bare (executed) main-compile line:\n${first.out.slice(-3000)}`);
+
+    // SECOND run, SAME work directory, file left untouched since the first run: Gradle's own incremental
+    // build correctly recognizes nothing changed and reports every main-source compile task UP-TO-DATE —
+    // the exact console shape the race produces, reached here without any race at all. `cleanTest` still
+    // forces the test task to re-execute, faithfully reproducing the same (genuinely correct) green.
+    const second = runOne(w, 'gradle', 'src/test/kotlin/StaleGateTest.kt', 'demo.StaleGateTest.testStaleGateEcho', 180000);
+    assert.equal(second.compiled, true, `second run should still compile:\n${second.out.slice(-3000)}`);
+    assert.ok(second.passed > 0 && second.failed === 0, `second run reuses the exact same mutant — still a survivor: ${JSON.stringify({ passed: second.passed, failed: second.failed })}`);
+    assert.equal(mainCompileExecuted(second.out), false, `second run must show no bare main-compile line (reused, not recompiled):\n${second.out.slice(-3000)}`);
+  } finally { rmSync(w, { recursive: true, force: true }); }
+});
+
 test('prove() gradle e2e: fixture verdicts', opts, () => {
   const w = workCopy();
   try {
@@ -80,6 +155,61 @@ test('prove() gradle e2e: fixture verdicts', opts, () => {
     assert.ok(r.hollow.every((h) => !h.survivors.includes('sound')), `sound() must be CAUGHT, not hollow: ${JSON.stringify(r.hollow)}`);
     assert.ok(r.skipped.some((s) => s.why === 'no-pin'), 'weakPositive should be no-pin');
     assert.ok(r.skipped.some((s) => s.why === 'ungutable'), 'testFirstTwo (List return) sentinel type-fails → ungutable');
+  } finally { rmSync(w, { recursive: true, force: true }); }
+});
+
+// relational-assert reach over the REAL gradle runner (mirrors test/relational-reach.test.mjs's JS
+// coverage, on JVM): score(x) = x*2 is credited only through Kotlin relational assertTrue forms — the
+// paren call (testScoreBound) and the parenless trailing-lambda call (testScoreOneSided). testScoreBound
+// pins score(3) < 100: the +HUGE sentinel makes it red on the very first (non-deep) run -> PROVEN.
+// testScoreOneSided pins score(2) > 0: +HUGE survives (still > 0), but the confirm-before-accuse
+// opposite-sentinel check (run automatically for every survivor, deep or not) goes red at -HUGE (no
+// longer > 0) -> ONE-SIDED, never hollow.
+//
+// testLabelUnbound is the string-sentinel case (amended in from Item B — a plain JS/TS/Python fn can
+// never reach it: grossBreak's typed sentinel only exists for a Kotlin/Java declared return type, see
+// test/relational-reach.test.mjs's own header note on that class). label(x): String = "v" + x gets the
+// STRING sentinel ("__gutcheck_987654321__"), which has NO opposite mutant (grossBreakOpposite returns
+// null for a string sentinel — no sign to flip). The bound "￿" sorts lexicographically ABOVE both
+// the real value ('v...') and the ASCII sentinel ('_...'), so the mutant SURVIVES with no opposite
+// evidence at all -> the relation is unbound, never hollow (relational-only survivors can prove or go
+// one-sided but can never convict).
+//
+// New Score.kt/ScoreTest.kt files added to THIS test's own work copy only (same pattern as the
+// K2-companion test above) — prove() is scoped to just ScoreTest.kt via `files` so the shared
+// CalcTest.kt's own pre-existing caught/hollow verdicts (see the fixture-verdicts test above) can never
+// leak into this block's r.hollow/r.skipped counts.
+test('gradle e2e: relational one-sided tier — paren assertTrue proves, trailing-lambda assertTrue is one-sided, string-sentinel relational survivor is relation-unbound', opts, () => {
+  const w = workCopy();
+  try {
+    writeFileSync(join(w, 'src/main/kotlin/Score.kt'), [
+      'package demo', '',
+      'fun score(x: Int): Int = x * 2',
+      'fun label(x: Int): String = "v" + x',
+      '',
+    ].join('\n'));
+    writeFileSync(join(w, 'src/test/kotlin/ScoreTest.kt'), [
+      'package demo', '',
+      'import org.junit.jupiter.api.Test',
+      'import org.junit.jupiter.api.Assertions.assertTrue', '',
+      'class ScoreTest {',
+      '    @Test fun testScoreBound() { assertTrue(score(3) < 100) }',
+      '    @Test fun testScoreOneSided() { assertTrue { score(2) > 0 } }',
+      '    @Test fun testLabelUnbound() { assertTrue(label(2) < "￿") }',
+      '}', '',
+    ].join('\n'));
+
+    const r = prove(w, { runner: 'gradle', timeoutMs: 300000, files: ['ScoreTest.kt'] });
+    assert.equal(r.runner, 'gradle');
+    assert.ok(r.caught >= 1, `testScoreBound (paren assertTrue) should prove: ${JSON.stringify(r)}`);
+    assert.ok(r.oneSided.some((o) => o.name.includes('testScoreOneSided')), `testScoreOneSided (trailing-lambda assertTrue) should be one-sided: ${JSON.stringify(r.oneSided)}`);
+    assert.deepEqual(
+      r.skipped.filter((s) => s.why === 'relation-unbound').map((s) => s.name.split('.').pop()),
+      ['testLabelUnbound'],
+      `testLabelUnbound (string-sentinel, no opposite evidence) should be relation-unbound: ${JSON.stringify(r.skipped)}`,
+    );
+    assert.equal(r.hollow.length, 0, `hollow: ${JSON.stringify(r.hollow)}`);
+    assert.ok(!r.skipped.some((s) => s.name.includes('testScoreBound') || s.name.includes('testScoreOneSided')), `neither of the other two tests should be skipped: ${JSON.stringify(r.skipped)}`);
   } finally { rmSync(w, { recursive: true, force: true }); }
 });
 

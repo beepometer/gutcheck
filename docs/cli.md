@@ -20,7 +20,9 @@ gutcheck --demo                   planted two-test example, demonstrates a catch
 gutcheck [path] --files=a,b       probe only these test files
 gutcheck [path] --runner=<r>      override the detected runner (vitest jest mocha ava pytest node gradle maven)
 gutcheck [path] --max-probes=<n>  cap probed functions (bounds latency on a big diff; default 40)
-gutcheck [path] --time-budget=<s> wall-clock cap for the whole run — analysis and probing; blocks past the budget report as unverifiable (probe-cap), never guessed
+gutcheck [path] --no-fallback     never widen an empty --since scope to a full-suite scan (the agent hook, CI)
+gutcheck --no-self-check          skip the startup self-check (probe mode only; not recommended)
+gutcheck [path] --time-budget=<s> wall-clock cap for the whole probe pass — analysis and probing; blocks past the budget report as unverifiable (probe-cap), never guessed
 gutcheck [path] --deep            costlier evidence, same coverage — roughly double the mutant runs on the same probeable tests.
                                   By default only a candidate hollow is confirmed against the opposite-signed sentinel (hollow =
                                   green under BOTH directions; red under exactly one = one-sided, a verdict that never blocks).
