@@ -465,8 +465,10 @@ test('gradleTaskInfo: module-prefixed KMP and root plain-JVM selection are uncha
 });
 
 // ---- Android extension (opt-in, env-gated): the plain-JVM fixture above never exercises AGP's
-// `testDebugUnitTest` branch of gradleTaskInfo/runOne — that needs a real Android module (a synthetic
-// fixture would have to fake the whole AGP + Robolectric toolchain). Bring your own app repo
+// `testDebugUnitTest` branch of gradleTaskInfo/runOne — that needs a real Android module. The three
+// legs need only an AGP `:app:testDebugUnitTest` producing XML; Robolectric is not load-bearing. The
+// vendored `test/fixtures/android-project` satisfies them, and the weekly/opt-in `android-e2e`
+// workflow runs them in CI. For a local run against a real app instead, bring your own app repo
 // (single :app module, unit tests present) and name the probe targets:
 //   GUTCHECK_ANDROID_E2E_PROJ       path to the repo (driven via a work copy, read-only to the original)
 //   GUTCHECK_ANDROID_E2E_TEST       repo-relative path of a unit-test .kt file

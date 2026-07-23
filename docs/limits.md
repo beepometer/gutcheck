@@ -14,6 +14,14 @@ One probe per repository at a time: a run that finds another gutcheck probe acti
 repo refuses with a stated reason instead of driving two test runners into each other (the agent
 hook yields to a CLI sweep the same way). A lock left by a dead process clears itself.
 
+The probe never runs tests in your working tree. Each run copies the project—minus build output,
+caches, and VCS metadata (`build/`, `.gradle/`, `node_modules/`, `.git/`, …)—into a disposable temp
+directory, drives every build and test run there, and deletes the copy when the run ends. Your
+tree's `build/test-results` and other outputs are never written. The copy does share machine-level
+state with concurrent builds—the Gradle daemon registry and `~/.gradle` caches—so a probe running
+alongside a real build can contend for daemons and memory, but it cannot collide with your build's
+files.
+
 ## What the probe can reach
 
 A test is probed only if it pins a concrete value and the tested function can be located from the
@@ -31,6 +39,12 @@ artifact: a whole-repo run that completes inside its cap and budget has reached 
 technique can reach, and the fraction does not grow with more compute. Observed on a large
 Android/Kotlin app: ~10% of tests verdict-able at completion. Execution-verifying that slice beats
 assuming all of it — but raising `--max-probes`/`--time-budget` past a completed run buys nothing.
+
+Probe cost scales with the runner: a JS/TS probe is roughly a second; a Gradle/Android probe is
+~10–15 s even against a warm daemon. Under the Stop hook's default budget (`--max-probes=20
+--time-budget=90`) a Gradle host therefore yields single-digit verdicts per run—the hook's useful
+output there is the untested/unverifiable denominator, not verdict volume. For verdict coverage on
+Gradle/Android, run the CLI pre-merge over scoped `--files` chunks instead.
 
 ## Sentinel direction on threshold logic
 

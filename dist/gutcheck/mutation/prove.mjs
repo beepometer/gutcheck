@@ -22,7 +22,7 @@ import { sutFnsIn } from './confirm.mjs';
 import { codeOnly } from '../checker/lexer.mjs';
 import { classifyChanges, hunkNewRanges, changedDecls } from './changes.mjs';
 import { selfEchoAssertion, titleSutCandidates } from './wrongLayerShadow.mjs';
-import { acquireRepoLock } from './lock.mjs';
+import { acquireRepoLock, reapStaleWork, markWorkOwned } from './lock.mjs';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.claude', 'dist', 'build', '.gradle', 'target', 'vendor', '.venv', 'venv', '__pycache__', 'out', 'coverage', '.next', '.svelte-kit', '.vite']);
 const DEFAULT_TIMEOUT_MS = Number(process.env.GUTCHECK_PROBE_TIMEOUT_MS) || 60000;
@@ -73,6 +73,12 @@ export function javaExe() {
   }
   return _javaExe;
 }
+// Reap orphaned prove() work copies at most ONCE per process (mutation/lock.mjs's reapStaleWork):
+// gutcheck.mjs's --since-unresolvable and empty-scope full-suite fallbacks re-enter prove() up to
+// twice in the same CLI process, and this module's own callers (tests, main()'s retries) may call
+// prove() far more than that — the tmpdir sweep is startup hygiene, not per-run work, so repeating
+// it inside one process only pays its cost (a full tmpdir readdir) again for zero extra benefit.
+let staleWorkReaped = false;
 // mvn binary resolution — mirrors javaExe()'s discipline (every candidate is actually EXECUTED and
 // validated before being trusted, never just assumed present): an explicit override
 // (GUTCHECK_MVN — an absolute path to an mvn binary) wins first, then `mvn` on PATH, then the project's
@@ -1349,6 +1355,27 @@ export function eligibleFnsDetail(body, candidateFns, imports = new Map(), lang)
         const recv = kotlinReceiverCall(m[2], imports);
         if (recv && candidateFns.includes(recv)) eligible.add(recv);
       }
+      // Destructuring val-hop (field report 2026-07-22 §3): `val (a, b, …) = f(...)` binds componentN()
+      // of f's return, so a pin on ANY component is bound by f exactly as a pin on a single-var hop is —
+      // componentN is a projection of the returned object, never weaker evidence than the single-var hop.
+      // Same masked matchAll, same same-line `=(?!>)` separator, same kotlinLeadingCall/kotlinReceiverCall
+      // heads: the dead-branch (if/when head) and mock-receiver (lowercase/unimported) moats carry over
+      // unchanged. The `.split(',')` on the component list is not angle-bracket-aware — a component's own
+      // generic annotation (`val (a: Map<String, Int>, b) = …`) yields a harmless phantom token (`Int>`)
+      // that can never match a real pinned var; the boundary names always survive intact. SOUND TODAY only
+      // while gutValueFor's gutable set stays scalar-only: every destructurable type (data class,
+      // Pair/Triple, Map.Entry, Array/List) falls through to the numeric sentinel → compile-fail →
+      // 'ungutable', so this hop converts skip reasons (pin-unresolved → ungutable), never mints a mutant
+      // run. If a collection/data-class sentinel ever lands in gutValueFor, re-audit this credit path for
+      // false-hollow exposure first.
+      for (const m of masked.matchAll(/\b(?:val|var)\s*\(\s*([^)\n]+?)\s*\)[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
+        const names = m[1].split(',').map((s) => s.trim().split(':')[0].trim());
+        if (!names.some((n) => bareVars.has(n))) continue; // at least one component is a pinned bare var
+        const lead = kotlinLeadingCall(m[2]);
+        if (lead && candidateFns.includes(lead)) eligible.add(lead);
+        const recv = kotlinReceiverCall(m[2], imports);
+        if (recv && candidateFns.includes(recv)) eligible.add(recv);
+      }
     }
     return eligible;
   };
@@ -2505,6 +2532,11 @@ export function prove(dir, opts = {}) {
   let testFiles = all.filter(isTestPath);
   if (opts.files && opts.files.length) testFiles = testFiles.filter((f) => opts.files.some((s) => toPosix(f).includes(toPosix(s))));
   const srcFiles = all.filter((f) => (/\.(m|c)?[jt]sx?$/.test(f) && !/\.d\.ts$/.test(f) || /\.py$/.test(f) || /\.(kt|java)$/.test(f)) && !isTestPath(f));
+  // A scan root that contains test files but ZERO non-test source files can never resolve any SUT —
+  // every pinned block reports sut-unresolved. Field report 2026-07-22 §4: a --files run invoked from
+  // inside the test directory read as a resolver regression; N per-test resolution failures masked one
+  // scope mistake. State it once, up front.
+  const scopeWarning = (!srcFiles.length && testFiles.length) ? `no non-test source files under ${dir} — SUT resolution will fail for every test; run from the project root that contains both sources and tests` : undefined;
   const resolveSut = makeResolver(srcFiles, dir);
   const lang = (f) => (f.endsWith('.py') ? 'python' : f.endsWith('.kt') ? 'kotlin' : f.endsWith('.java') ? 'java' : 'js');
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
@@ -2548,13 +2580,20 @@ export function prove(dir, opts = {}) {
     const who = repoLock.held && repoLock.held.pid ? ` (pid ${repoLock.held.pid})` : '';
     return { runner, scored: 0, caught: 0, hollow: [], inconclusive: [], skipped: [], outOfScope: 0, probes: 0, pct: null, scopeError: `another gutcheck probe is already running on this repo${who} — likely the agent hook or another terminal; rerun when it finishes (a stale lock clears itself)`, changes: null, changeSummary: null };
   }
+  // Reap orphaned work copies from prior SIGKILL'd runs (mutation/lock.mjs) before minting our own —
+  // after the repo lock is held (so this doesn't race a concurrent probe's own startup) and before
+  // this run's mkdtemp (so this run's own dir cannot be present yet to mis-scan). Once per process
+  // (staleWorkReaped, declared near javaExe() above): flag set BEFORE the call so a throwing reap
+  // can never retry — hygiene stays fail-silent-once, never a repeated per-call tmpdir scan.
+  if (!staleWorkReaped) { staleWorkReaped = true; reapStaleWork(); }
 
   const work = mkdtempSync(join(tmpdir(), 'gutcheck-prove-'));
+  markWorkOwned(work);
   // Counter units differ by design: `probes` counts mutant runs — one per eligible FUNCTION gutted —
   // while caught/hollow/scored count TEST-BLOCK verdicts. A block binding K functions yields K probes
   // but one verdict, so probes ≥ scored always; the excess is multi-function blocks (plus any
   // survivors inside a caught block, surfaced separately as grossSurvivors). pct reads caught/scored only.
-  let caught = 0; const hollow = []; const inconclusive = []; const skipped = []; const weak = []; const oneSided = []; let oneSidedBlocks = 0; let probes = 0; let outOfScope = 0; let capped = 0; let envAborted = 0;
+  let caught = 0; const hollow = []; const inconclusive = []; const skipped = []; const weak = []; const oneSided = []; let oneSidedBlocks = 0; let probes = 0; let outOfScope = 0; let capped = 0; let envAborted = 0; const proven = [];
   // Stale-build gate memo (field report 2026-07-18), gradle-only: one entry per sut file, the LAST
   // mutant content this run itself watched compile fresh (a bare line). The SAME sut function is
   // routinely gutted more than once in a single run — any other test block that also calls it gets an
@@ -2714,14 +2753,22 @@ export function prove(dir, opts = {}) {
       // 'caught'), so this changes no verdict, count, or report line.
       // caughtPairs/survivorPairs: (fn, sutRel) pairs built from THIS block's own sutOf map — the
       // (fn, file)-identity classifyChanges needs to attribute a verdict without a bare-name collision
-      // across files (mutation/changes.mjs's refEligible/hollowIn/provenIn). In-memory only, same as
-      // caughtFns/survivors — never surfaced in r.hollow or formatReport.
+      // across files (mutation/changes.mjs's refEligible/hollowIn/provenIn). blockRecords itself is
+      // in-memory only (never surfaced in r.hollow or formatReport) — but caughtPairs is hoisted below
+      // so the SAME array also seeds r.proven[].pairs (field report 2026-07-22 §6), the one place this
+      // per-fn evidence does reach the public result.
       // testChanged (same-diff-oracle provenance, Task 7): whether THIS test FILE was itself part of
       // the diff (`absTestKey` is computed once per test file, above) — a fact classifyChanges can
       // later fold into a proven row's evidence (every binding block's test file changed in this diff
       // → the oracle is same-diff, worth stating as fact, not a verdict). false on a full-scan run
       // (changed is null) — there is no "this diff" to be same to.
-      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'caught', caughtFns: boundFns.map((x) => x.fn), survivors, caughtPairs: boundFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) })), survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}), testChanged: changed ? changed.has(absTestKey) : false });
+      const caughtPairs = boundFns.map((x) => ({ fn: x.fn, sutRel: sutOf.get(x.fn) }));
+      blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'caught', caughtFns: boundFns.map((x) => x.fn), survivors, caughtPairs, survivorPairs: survivors.map((fn) => ({ fn, sutRel: sutOf.get(fn) })), ...(oneSidedPairs.length ? { oneSidedPairs } : {}), testChanged: changed ? changed.has(absTestKey) : false });
+      // proven[] (field report 2026-07-22 §6): the machine-readable twin of `caught++` — which test, at
+      // which line, bound which fn. hollow[] has carried this per-row evidence since day one; proven rows
+      // were scalar-only, so a --files run (the documented big-repo chunking mode) had no record of WHAT
+      // was proven. Omit-when-empty at the return site (grossSurvivors precedent).
+      proven.push({ file: rel, line: b.line, name: b.name, fns: boundFns.map((x) => x.fn), pairs: caughtPairs });
       tallyBlock(brokeFns.map((x) => x.fn), survivors);
     }
     else if (flakyBlock) {
@@ -3233,7 +3280,7 @@ export function prove(dir, opts = {}) {
   const hollowFns = new Set(hollow.flatMap((h) => h.survivors));
   const grossSurvivorsList = [...survivorTally.values()].filter((e) => e.survivedIn.length > 0 && e.caughtIn === 0 && !hollowFns.has(e.fn));
 
-  return { runner, scored, caught, hollow, weak, oneSided, oneSidedBlocks, ...(opts.deep ? { weakSummary } : {}), inconclusive, skipped, outOfScope, probes, capped, envAborted, pct: scored ? Math.round((caught / scored) * 100) : null, changedFileCount, changes, changeSummary, ...(grossSurvivorsList.length ? { grossSurvivors: grossSurvivorsList } : {}) };
+  return { runner, scored, caught, hollow, weak, oneSided, oneSidedBlocks, ...(proven.length ? { proven } : {}), ...(opts.deep ? { weakSummary } : {}), inconclusive, skipped, outOfScope, probes, capped, envAborted, pct: scored ? Math.round((caught / scored) * 100) : null, changedFileCount, changes, changeSummary, ...(grossSurvivorsList.length ? { grossSurvivors: grossSurvivorsList } : {}), ...(scopeWarning ? { scopeWarning } : {}) };
 }
 
 // Plain-English translation of a skip/inconclusive why-code, for the unverifiable section only — a
@@ -3247,7 +3294,7 @@ const UNVERIFIABLE_REASON_MSG = {
   'relation-unbound': "relational oracle — the mutant survived both extremes; the relation doesn't pin a value",
   'sut-unresolved': "can't locate the function from the test's imports",
   'dynamic-title': 'test name is computed at runtime',
-  'ungutable': "function body can't be safely mutated",
+  'ungutable': "no compiling wrong-value sentinel for this function (return type or body form)",
   'instrumented-test': 'needs a device/emulator',
   'unsupported-source-set': 'unsupported Gradle source set',
   'probe-cap': 'not probed — probe cap or time budget reached (raise --max-probes/--time-budget)',
@@ -3520,7 +3567,8 @@ function formatDiffReport(r) {
 
 export function formatReport(r) {
   if (r.scopeError) return `gutcheck: ${r.scopeError}`;
-  return r.changeSummary ? formatDiffReport(r) : formatFullScanReport(r);
+  const body = r.changeSummary ? formatDiffReport(r) : formatFullScanReport(r);
+  return r.scopeWarning ? `gutcheck: warning: ${r.scopeWarning}\n${body}` : body;
 }
 
 // CLI: gutcheck prove [dir] [--since=<ref>] [--files=substr,substr] [--runner=R] [--deep] [--json]

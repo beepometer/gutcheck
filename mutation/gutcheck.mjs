@@ -272,7 +272,7 @@ function explain(dir, target, runner) {
     const msg = skip.why === 'sut-unresolved'
       ? 'not probed: the test pins a value, but the function it tests could not be located from the test file\'s imports (relative-import SUTs only).'
       : skip.why === 'ungutable'
-        ? 'not probed: the tested function\'s body could not be gutted (unsupported declaration form).'
+        ? 'not probed: no compiling wrong-value sentinel for the tested function — a data-class/collection return type, or an unsupported body form.'
         : skip.why === 'dynamic-title'
           ? 'not probed: the title contains template-literal interpolation (`${...}`) — its runtime value can\'t be known statically, so no runner selection can target it.'
           : 'not probed: no value-pinning assertion (toBe/toEqual/strictEqual/===). gutcheck only probes tests that pin a value.';
@@ -281,6 +281,17 @@ function explain(dir, target, runner) {
   if (incon) {
     out.push(`  → inconclusive: ${incon.why}.`);
     if (incon.detail) out.push('  runner output (tail):\n    ' + String(incon.detail).trim().split('\n').join('\n    '));
+    process.stdout.write(out.join('\n') + '\n'); return 0;
+  }
+  // Named receipt (field report 2026-07-22 §6): r.proven[] carries WHICH fn this block bound, same
+  // (fn, sutRel) disambiguation as the hollow branch above — falls back to the generic line only for
+  // an old-shape result (no r.proven at all, e.g. a stale hook-side cache of a pre-this-task run).
+  const prov = (r.proven || []).find((p) => p.name === blk.name);
+  if (prov) {
+    const pair = (prov.pairs || [])[0];
+    const fn = pair ? pair.fn : ((prov.fns || [])[0] || 'the function');
+    const label = pair && pair.sutRel ? `${fn}() (${pair.sutRel})` : `${fn}()`;
+    out.push(`  → PROVEN. gutcheck replaced ${label}'s body with a wrong-value sentinel and reran only this test: it FAILED — the test binds ${label} (binds, not certifies correct).`);
     process.stdout.write(out.join('\n') + '\n'); return 0;
   }
   out.push('  → PROVEN. gutting the function it tests makes this test FAIL — the test binds the function (binds, not certifies correct).');

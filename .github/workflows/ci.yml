@@ -37,9 +37,10 @@ jobs:
       - run: npm ci
       - run: npm test
   # JVM leg: a JDK makes the toolchain-gated Gradle/JUnit probe e2es EXECUTE (they skip on the legs
-  # above, which have no java). The Android testDebugUnitTest e2es stay skipped here (no Android SDK on
-  # the runner — Android is validated locally). The probe runs Gradle with `--offline`, so we warm the
-  # shared ~/.gradle cache with one online build of the vendored fixture FIRST; otherwise a fresh
+  # above, which have no java). The Android testDebugUnitTest e2es stay skipped here (Android runs in
+  # the separate weekly/opt-in android-e2e workflow against the vendored AGP fixture). The probe runs
+  # Gradle with `--offline`, so we warm the shared ~/.gradle cache with one online build of the
+  # vendored fixture FIRST; otherwise a fresh
   # runner's offline resolve finds nothing and the e2es fail at the baseline. The Maven e2es (test/
   # jvm-e2e.test.mjs, GUTCHECK_MVN-gated) get the same treatment: ubuntu-latest ships a `mvn` binary, we
   # resolve its path (never hardcode — runner images can move it) and warm ~/.m2 the same way.

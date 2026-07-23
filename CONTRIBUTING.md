@@ -9,6 +9,11 @@ charter lives in [CLAUDE.md](CLAUDE.md). Read it before a non-trivial change.
 - `npm install`—Gutcheck has zero dependencies, so this is a no-op; run it anyway to get a clean
   `package-lock.json`.
 
+`npm install -g .` from a checkout installs a **symlink** to the working tree—the global `gutcheck`
+then tracks your checkout live, including uncommitted edits and whatever branch is checked out. To
+validate an isolated artifact instead, `npm pack` and install the tarball:
+`npm install -g ./gutcheck-<version>.tgz`.
+
 ## Keep the gates green
 
 Every change must pass:

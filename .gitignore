@@ -23,3 +23,9 @@ test/fixtures/jvm-project/**/build/
 test/fixtures/maven-project/target/
 test/fixtures/maven-reactor/target/
 test/fixtures/maven-reactor/**/target/
+
+# Android probe fixture build output
+test/fixtures/android-project/.gradle/
+test/fixtures/android-project/build/
+test/fixtures/android-project/**/build/
+test/fixtures/android-project/local.properties

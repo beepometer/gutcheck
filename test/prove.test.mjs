@@ -1381,7 +1381,7 @@ test('formatReport: every mapped unverifiable why-code reads as plain English (s
   });
   assert.match(formatReport(mk('sut-unresolved')), /x \(can't locate the function from the test's imports\)/);
   assert.match(formatReport(mk('dynamic-title')), /x \(test name is computed at runtime\)/);
-  assert.match(formatReport(mk('ungutable')), /x \(function body can't be safely mutated\)/);
+  assert.match(formatReport(mk('ungutable')), /x \(no compiling wrong-value sentinel for this function \(return type or body form\)\)/);
   assert.match(formatReport(mk('instrumented-test')), /x \(needs a device\/emulator\)/);
   assert.match(formatReport(mk('unsupported-source-set')), /x \(unsupported Gradle source set\)/);
   assert.match(formatReport(mk('baseline 0p/1f')), /x \(the referencing test is inconclusive\)/, 'a baseline-flavored inconclusive reason reads as one readable phrase');
@@ -2848,12 +2848,32 @@ test('fmt sound', () => { assert.strictEqual(fmt(13.5), '$13.50'); });
     assert.deepEqual(r, {
       runner: 'node', scored: 3, caught: 2,
       hollow: [{ file: 'test/t.test.mjs', line: 3, name: 'shadow', survivors: ['total'], survivorPairs: [{ fn: 'total', sutRel: 'src/lib.mjs' }] }],
-      weak: [], oneSided: [], oneSidedBlocks: 0, inconclusive: [],
+      weak: [], oneSided: [], oneSidedBlocks: 0,
+      proven: [
+        { file: 'test/t.test.mjs', line: 2, name: 'add sound', fns: ['add'], pairs: [{ fn: 'add', sutRel: 'src/lib.mjs' }] },
+        { file: 'test/t.test.mjs', line: 5, name: 'fmt sound', fns: ['fmt'], pairs: [{ fn: 'fmt', sutRel: 'src/lib.mjs' }] },
+      ],
+      inconclusive: [],
       skipped: [{ file: 'test/t.test.mjs', line: 4, name: 'weak', why: 'no-pin' }],
       outOfScope: 0, probes: 4, capped: 0, envAborted: 0, pct: 67,
       changedFileCount: undefined, changes: null, changeSummary: null,
-    }, 'the WHOLE result must match the snapshot (probes counts the hollow-confirmation mutant; the self-comparison survives both sentinels) — grossSurvivors absent (hollow-only survivor evidence is not novel)');
+    }, 'the WHOLE result must match the snapshot (probes counts the hollow-confirmation mutant; the self-comparison survives both sentinels) — grossSurvivors absent (hollow-only survivor evidence is not novel); proven[] (field report §6) is the machine-readable twin of caught: add sound (line 2) and fmt sound (line 5) each bind their one fn');
     assert.ok(!('grossSurvivors' in r), 'the key must be omitted entirely, not present-as-[] or present-as-undefined');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('PROVE: proven[] is omitted entirely when no block is caught', () => {
+  const d = project({
+    'src/lib.mjs': `export const one = () => 1;\n`,
+    'test/t.test.mjs': `import { test } from 'node:test'; import assert from 'node:assert';
+import { one } from '../src/lib.mjs';
+test('weak only', () => { assert.ok(one() !== null); });
+`,
+  });
+  try {
+    const r = prove(d, { runner: 'node' });
+    assert.equal(r.caught, 0);
+    assert.ok(!('proven' in r), 'proven must be omitted, not present-as-[]');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -3018,4 +3038,21 @@ test('prove: an exhausted time budget caps remaining blocks before analysis — 
   assert.equal(r.capped, 2, 'both blocks report probe-cap — analysis itself is bounded');
   assert.equal(r.skipped.length, 0, 'no block reached eligibility classification after exhaustion');
   rmSync(d, { recursive: true, force: true });
+});
+
+// Field report 2026-07-22 §4: a scan root that contains ONLY test files (e.g. --files run from inside
+// the test directory, or a scope that never reaches the sources) resolves zero SUTs, so every pinned
+// block reports sut-unresolved — N per-test failures with no single message naming the actual scope
+// mistake. r.scopeWarning states it once, up front; formatReport renders it as the report's first line.
+test('PROVE: a scan root with tests but zero non-test sources states the scope problem once, up front', () => {
+  const d = project({
+    'test/t.test.mjs': `import { test } from 'node:test'; import assert from 'node:assert';
+test('pins', () => { assert.strictEqual(add(2, 3), 5); });
+`,
+  });
+  try {
+    const r = prove(d, { runner: 'node' });
+    assert.match(r.scopeWarning, /no non-test source files/);
+    assert.match(formatReport(r), /^gutcheck: warning: no non-test source files/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

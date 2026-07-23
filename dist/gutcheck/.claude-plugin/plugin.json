@@ -1,7 +1,7 @@
 {
   "name": "gutcheck",
   "description": "Prove your AI-written tests actually test your code — a fast, diff-scoped mutation probe that guts each tested function and reports the tests that don't notice, plus a self-testing deterministic checker that fails closed unless it catches its own planted bugs.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "the Gutcheck authors"
   },

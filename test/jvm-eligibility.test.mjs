@@ -398,12 +398,11 @@ class T {
   assert.ok(blocks[0].body.includes('foo()'));
 });
 
-// ---- eligibleFnsDetail: the pin/eligibility split (public issue #3). A Kotlin destructuring declaration
-// `val (a, b) = call()` is invisible to the val-hop (its LHS is not a single identifier), so the fn is not
-// eligible — but the block DID pin literals, and reporting it 'no-pin' ("only checks a mock / no value
-// pinned") asserts a property of the test the probe never established. The detail form states both facts
-// separately so the caller can say "a pin exists; the scanner can't link it" instead. Oracle hand-derived
-// from the source text (5.0f/4.8f are literal pins; no hop shape links lengthM to boundingBoxM).
+// ---- eligibleFnsDetail: the pin/eligibility split (public issue #3). The destructuring val-hop can now
+// link `val (a, b) = call()` — but an Uppercase receiver still has to pass kotlinReceiverCall's import
+// gate. This body's `Geometry2` is NOT in the (empty) imports Map, so the credit is refused and the block
+// stays 'pin-unresolved': the hop extension never loosened the mock/unimported-receiver moat. The detail
+// form still states both facts separately ("a pin exists; the scanner can't link it").
 test('eligibleFnsDetail kotlin: destructuring val — pins recognized (hadPin) but no eligible link', () => {
   const body = `val (lengthM, widthM) = Geometry2.boundingBoxM(lShape)
 assertEquals(5.0f, lengthM, 1e-4f)
@@ -419,6 +418,73 @@ assertEquals(12.0f, area, 1e-4f)`;
   const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
   assert.deepEqual(d.eligible, ['computeArea']);
   assert.equal(d.hadPin, true);
+});
+
+// ---- Destructuring val-hop (field report 2026-07-22 §3): `val (a, b) = f(...)` binds componentN() of
+// f's return — a pin on ANY component is bound by f exactly as a single-var hop pin is. Guards mirror
+// the single-var hop: same-line only, if/when-head refused, lowercase/unimported receiver refused.
+test('eligibleFnsDetail kotlin: destructuring val — a pin on one component credits the RHS head call', () => {
+  const body = `val (scale, offset) = fitTransform(vertices, 400f, 300f)
+assertEquals(1.5f, scale, 1e-4f)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, ['fitTransform']);
+  assert.equal(d.hadPin, true);
+});
+
+test('eligibleFnsDetail kotlin: destructuring with `_` placeholder still credits', () => {
+  const body = `val (scale, _) = fitTransform(vertices, 400f, 300f)
+assertEquals(1.5f, scale, 1e-4f)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, ['fitTransform']);
+});
+
+test('eligibleFnsDetail kotlin: three-component destructuring, pin on the last component', () => {
+  const body = `val (lo, mid, hi) = splitBands(sig)
+assertEquals(3, hi)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, ['splitBands']);
+});
+
+test('eligibleFnsDetail kotlin: comma-bearing generic component annotation still credits the boundary names', () => {
+  const body = `val (a: Map<String, Int>, b) = compute(x)
+assertEquals(3, b)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, ['compute']);
+});
+
+test('eligibleFnsDetail kotlin: destructuring from an if/when-expression RHS is never credited (dead-branch moat)', () => {
+  const body = `val (a, b) = if (cond) compute(x) else other(x)
+assertEquals(3, a)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+test('eligibleFnsDetail kotlin: destructuring whose RHS is not a call is never credited', () => {
+  const body = `val (a, b) = pair
+assertEquals(3, a)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+test('eligibleFnsDetail kotlin: destructuring with NO pinned component is never credited', () => {
+  const body = `val (a, b) = compute(x)
+assertEquals(3, unrelated)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+test('eligibleFnsDetail kotlin: destructuring from a lowercase-receiver call is never credited (mock moat)', () => {
+  const body = `val (a, b) = mock.compute(x)
+assertEquals(3, a)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map(), 'kotlin');
+  assert.deepEqual(d.eligible, []);
+});
+
+test('eligibleFnsDetail kotlin: destructuring from an IMPORTED Uppercase receiver credits the method', () => {
+  const body = `val (lo, hi) = Modes.bandEdges(f)
+assertEquals(20.0f, lo, 1e-4f)`;
+  const d = eligibleFnsDetail(body, sutFnsIn(body, 'kotlin'), new Map([['Modes', 'com.x.Modes']]), 'kotlin');
+  assert.deepEqual(d.eligible, ['bandEdges']);
 });
 
 test('eligibleFnsDetail: a weak-only body has no pin at all — hadPin false (no-pin stays honest)', () => {

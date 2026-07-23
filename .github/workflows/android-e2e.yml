@@ -1,0 +1,31 @@
+# The AGP branch of gradleTaskInfo/runOne (variant-qualified compileDebugKotlin, testDebugUnitTest XML)
+# hosted two real field defects and has no coverage on the push-CI legs — this opt-in/weekly job runs the
+# three env-gated Android e2es against the vendored minimal AGP fixture. ubuntu-latest (x64) ships the
+# Android SDK + cmdline-tools preinstalled; the probe reruns Gradle --offline, so warm the cache with one
+# online build FIRST (same pattern as ci.yml's jvm job).
+name: android-e2e
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      GUTCHECK_ANDROID_E2E_PROJ: ${{ github.workspace }}/test/fixtures/android-project
+      GUTCHECK_ANDROID_E2E_TEST: app/src/test/java/demo/FxTest.kt
+      GUTCHECK_ANDROID_E2E_FQN: demo.FxTest.label_formatsBand
+      GUTCHECK_ANDROID_E2E_SUT: app/src/main/java/demo/Fx.kt
+      GUTCHECK_ANDROID_E2E_STRING_FN: label
+      GUTCHECK_ANDROID_E2E_BOOL_FN: trustworthy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Warm the Gradle/AGP cache for the offline probe e2es
+        run: cd test/fixtures/android-project && java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain :app:testDebugUnitTest --console=plain
+      - run: npm ci
+      - run: node --test --test-reporter=tap test/jvm-e2e.test.mjs

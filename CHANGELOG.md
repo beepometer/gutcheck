@@ -4,6 +4,39 @@ All notable changes to Gutcheck are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-07-22
+
+- `proven[]` in every mode—each caught block now emits a machine-readable row (`file`, `line`, test
+  `name`, bound `fns`, `(fn, sutRel)` pairs) alongside the existing scalar count, omitted when no
+  block is caught. `--files`-scoped chunk runs (the documented big-repo mode) previously recorded
+  proven tests only as a number; `--explain` on a proven block now names the gutted function and its
+  source file instead of a generic PROVEN line (field report 2026-07-22).
+- Kotlin reach: a destructuring declaration is a val-hop—`val (scale, offset) = fitTransform(...)`
+  credits `fitTransform` when any component is pinned (`_` placeholders and higher arities
+  included), through the same head-anchored, import-gated moats as the single-var hop. On
+  destructurable return types (`Pair`/`Triple`/data classes) this converts the misleading
+  `pin-unresolved` skip reason into the honest `ungutable`—reporting precision today, verdicts only
+  if those types ever gain a compiling sentinel.
+- A scan root that contains test files but zero non-test sources now states the scope problem once,
+  up front—`scopeWarning` in `--json`, first line of the human report—instead of letting one scope
+  mistake masquerade as per-test `sut-unresolved` failures (field report 2026-07-22).
+- The four `--json` denominators (`capped`, `changedFileCount`, `changeSummary.files`,
+  `changeSummary.notProbed`) are documented in the CLI reference, and the `ungutable` reason copy
+  now says what it means—no compiling wrong-value sentinel for the function's return type or body
+  form.
+- Fixed: a SIGKILL'd run (a harness or CI timeout) leaked its temp work copy (~1.3 GB per orphan on
+  a Gradle host). Each copy now carries a `{pid, started}` ownership marker; the first probe of a
+  process reaps copies whose owning pid is dead, and markerless dirs only past a 24-hour age guard
+  (post-fix validation report 2026-07-22).
+- Android/AGP e2e coverage: a vendored minimal AGP fixture and a weekly/opt-in `android-e2e`
+  workflow run the three env-gated Android legs—task resolution, mutant-caught, and the
+  compile-fail→`ungutable` leg on AGP's variant-qualified compile naming, the branch where two
+  prior field defects lived.
+- docs: `limits.md` documents the work-copy isolation architecture (the probe never runs tests in
+  your working tree; the residual is shared Gradle daemon/cache contention, never file collision)
+  and Gradle-host Stop-hook economics; CONTRIBUTING notes that `npm install -g .` symlinks the
+  checkout—validate releases from the `npm pack` tarball.
+
 ## [0.4.0] — 2026-07-21
 
 - Relational assertions are probe-eligible with asymmetric verdicting—`assert.ok(a > b)`,

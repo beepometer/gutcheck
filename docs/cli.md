@@ -31,6 +31,11 @@ gutcheck [path] --deep            costlier evidence, same coverage — roughly d
                                   covered only a fixed point; suppressed for functions with a production identity branch).
 ```
 
+`--json` field units—four counters share the payload and denominate different things: `capped` counts
+test **blocks** over the whole scanned scope that hit `--max-probes`/`--time-budget`; `changedFileCount`
+counts every **file** git reports changed (any type); `changeSummary.files` counts only changed non-test
+**source files**; `changeSummary.notProbed` counts changed **functions** the run never probed.
+
 ## Exit codes
 
 `0` on a clean run—no hollow test proven, including a run the environment aborted (a broken build
