@@ -4,6 +4,52 @@ All notable changes to Gutcheck are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-29
+
+- JS/TS SUT resolution reads through the import shapes real repos actually use, each with the same
+  refuse-when-unsure moats as the direct path:
+  - one hop of re-export barrel—`export { fn } from './impl.mjs'` (same-name only) and
+    `export * from` with exactly one declaring target; an explicit named re-export outranks stars,
+    matching ESM precedence. Aliased re-exports, deeper chains, and ambiguous star fan-outs still
+    report `unverifiable`.
+  - declarative path aliases—package.json `imports` (`#src/util`) and tsconfig/jsconfig
+    `compilerOptions.paths` (`~/util`, with `baseUrl`, one `extends` hop, JSONC tolerated)—with
+    tsc's own precedence: exact over wildcard, longest prefix, first existing target consumed with
+    no fallthrough (a later target would gut a file the runtime never loads). Aliases defined in
+    code (vitest `resolve.alias`, jest `moduleNameMapper`) cannot be read statically and report
+    `unverifiable`.
+  - namespace members—`_.sort(...)` under `import * as _ from '..'`, or the CJS form
+    `const R = require('..')`—bind the target module's export through the same core. Only true
+    namespace bindings credit (a default import's members are properties of one exported value);
+    mock-tainted files, shadowed/re-declared/monkey-patched receivers, and a CJS `module.exports`
+    reassigned to a non-object-literal all refuse.
+  - a bare dotted specifier (`from '..'`) resolves as the directory import it is, and TS NodeNext
+    `.js` specifiers over `.ts` sources resolve by extension swap—a literal on-disk file always
+    wins first.
+  Each shape was validated A/B against the prior engine on a wild-repo corpus (two rounds, twelve
+  repo runs): no false verdict introduced anywhere; namespace-import and NodeNext suites that
+  previously reported only `unverifiable`/`pin-unresolved` gain execution-backed verdicts.
+- A non-blocking checker advisory at the agent done-claim: one line over the diff's changed test
+  files from the deterministic checker (the four lint kinds plus two runway kinds field-measured
+  before any promotion). It never blocks and never mints a verdict; the probe keeps ownership of
+  blocking.
+- `magicLiteralGuard` gains the node:assert dialect—(actual, expected) argument order with an
+  optional trailing message; expected-first is a deliberate miss; the ≥3-fractional-digit floor
+  carries over. Calibration record (a 6-repo, ~19,300-assert sweep with a planted-specimen firing
+  check) in the module header. Fixed: a relative import path's dots no longer read as a value
+  derivation, which had silently exempted every literal within the window below a file's opening
+  imports.
+- Overclaim copy closed on every shipped surface—`--help`, the CI template, the check skill—and the
+  editorial enforcement test now scans all of them, not four JSON fields.
+- `prove.mjs` decomposed into five modules (`parse-utils`, `jvm`, `runners`, `python-resolve`,
+  `report`) with the public export surface pinned by test; a genuinely new export is a deliberate,
+  commented addition.
+- Dogfood honesty: the dist-sync tests self-skip with a stated reason inside the probe's sandbox
+  copy (which excludes build output), removing three permanent false "already failing" rows from
+  every self-run.
+- docs: `limits.md`'s reach section rewritten for the resolution shapes above and their residual
+  refusals.
+
 ## [0.5.0] — 2026-07-22
 
 - `proven[]` in every mode—each caught block now emits a machine-readable row (`file`, `line`, test

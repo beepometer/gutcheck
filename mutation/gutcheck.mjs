@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// gutcheck — prove your AI-written tests actually test your code. It guts each tested function with a
+// gutcheck — the mutation probe with a CLI front door. It guts each tested function with a
 // guaranteed-wrong return and reruns only that test; a survivor is re-gutted with the opposite-signed
 // return before any accusation — green under BOTH is HOLLOW (it can't detect that function breaking),
 // red under exactly one is one-sided (never a blocker). Default action: run the probe over your tests
@@ -17,7 +17,7 @@ import { runChecker } from '../checker/core.mjs';
 import { runGate } from './gate.mjs';
 
 const VERSION = (() => { try { return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version; } catch { return '0.0.0'; } })();
-const HELP = `gutcheck ${VERSION} — prove your AI-written tests actually test your code
+const HELP = `gutcheck ${VERSION} — guts each tested function and reruns only that test; reports proven, hollow, one-sided, unverifiable, or no binding test, each with a replayable receipt
 
   gutcheck [path] [--since <ref>]   gut each tested function and rerun its test; report the HOLLOW ones
                                     (--since scopes to tests touched since <ref>, falling back to a
@@ -325,7 +325,7 @@ function demo() {
 // ~zero defect yield (intent-flagging = noise) — the mutation probe owns the harmful subset instead.
 // The kind module stays, reachable only via an explicit checker config.
 // fallbackCollapse is now PROMOTED after earning it via CYCLE-10 corpus measurement (16 TRUE / 0 FP post-tightening).
-const LINT_KINDS = new Set(['derivationCoherence', 'assertionConsistency', 'testShapeGuard', 'fallbackCollapse']);
+export const LINT_KINDS = new Set(['derivationCoherence', 'assertionConsistency', 'testShapeGuard', 'fallbackCollapse']);
 
 // gutcheck lint — a sub-second deterministic pass of the near-zero-FP triage oracles (derivation
 // coherence, assertion consistency, hollow test shapes, fallback-collapse) for diffs with no probeable tests.

@@ -6,9 +6,10 @@
 // to a NON-local (imported) function is an independent oracle and is NOT flagged; nor is a local helper
 // that returns a dict/list/string/object/constructor (a fixture-builder or formatter, not a numeric
 // re-derivation — the gate that lets this tell a real shadow from make_item()/url_to_origin() on real code).
-// Window-aware: a // INDEPENDENT-ORACLE: / // SHADOW-OK: marker a few lines above exempts. Active in the
-// Node floor; `configure` also emits a Python variant (py-shadow-oracle-guard) for pytest projects; other
-// build systems get only the language-agnostic checks until calibrated.
+// Window-aware: a // INDEPENDENT-ORACLE: / // SHADOW-OK: marker a few lines above exempts.
+// Registered ADVISORY in the Node floor (configure/gutcheck.default.json) and as a FAIL check in the
+// Python set (configure/checksets/python.mjs) — the Python dialect has a corpus sweep behind it, the JS
+// dialect does not yet, so on JS it is reported and never fails a run. Not in LINT_KINDS.
 //
 // Out of deterministic reach (by design, to stay low-false-positive): re-running the IMPORTED
 // system-under-test into a variable — `const e = sut(); expect(sut()).toBe(e)` — because the checker

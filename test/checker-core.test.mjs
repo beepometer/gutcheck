@@ -97,7 +97,7 @@ test('the shipped default config self-validates end-to-end (meta-guard clean ove
   const ROOT = fileURLToPath(new URL('../', import.meta.url));
   const cfg = JSON.parse(readFileSync(join(ROOT, 'configure', 'gutcheck.default.json'), 'utf8'));
   const checks = buildChecks(cfg);
-  assert.equal(checks.length, 6, 'the default out-of-box floor must carry exactly 6 source-discipline checks');
+  assert.equal(checks.length, 7, 'the default out-of-box floor must carry exactly 7 source-discipline checks');
   assert.deepEqual(runMetaGuard(checks), [], 'every default-config check must satisfy its own self-test');
 });
 
@@ -115,7 +115,7 @@ test("default config runs end-to-end through runChecker (wiring; corpus is empty
   });
   assert.equal(res.phase, 'scan', 'must reach the scan phase (meta-guard did not crash it)');
   assert.equal(res.ok, true, 'end-to-end run must complete ok: ' + JSON.stringify(res.offenders));
-  assert.equal(res.checkCount, 6);
+  assert.equal(res.checkCount, 7);
   assert.equal(res.offenders.length, 0);
 });
 
@@ -195,5 +195,49 @@ test('selfComparisonOracle is NOT in the shipped default config, but is reachabl
     const res = runChecker(explicit, { harnessDir: d, repoRoot: d, testSrcRoots: [join(d, 'test')] });
     assert.equal(res.phase, 'scan');
     assert.deepEqual(res.offenders.map((o) => o.kind), ['selfComparisonOracle'], 'the planted specimen must surface through runChecker via the explicit config');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// ctx.fileFilter — diff-scoping seam for the done-claim advisory (mutation/advise.mjs). Narrowing
+// ctx.testSrcRoots instead would drag in every unchanged sibling of a changed file, so the filter sits
+// in the dispatch loop where it applies to every kind without any kind knowing about it.
+test('core: ctx.fileFilter restricts the corpus without touching any kind', () => {
+  const d = mkdtempSync(join(tmpdir(), 'gc-filefilter-'));
+  try {
+    mkdirSync(join(d, 'test'), { recursive: true });
+    // Both files carry the SAME must-flag shape, so a difference in output can only come from the filter.
+    const offending = 'expect(rows.length).toBeGreaterThanOrEqual(0)\n';
+    writeFileSync(join(d, 'test/kept.test.js'), offending);
+    writeFileSync(join(d, 'test/dropped.test.js'), offending);
+
+    const cfg = {
+      language: { fileExt: '.js' },
+      paths: { srcRoots: { test: ['test'] } },
+      checker: { checks: [{
+        id: 'shape', kind: 'testShapeGuard',
+        description: 'tautological length assertion',
+        params: { lang: 'typescript', rules: [{
+          id: 'tautology-js-length-ge-0',
+          patternSrc: 'expect\\(\\s*[^)]*\\.(?:length|size)\\s*\\)\\s*\\.(?:toBeGreaterThanOrEqual\\(\\s*0\\s*\\)|toBeGreaterThan\\(\\s*-1\\s*\\))',
+        }] },
+        selfTest: {
+          mustFlag: ['expect(rows.length).toBeGreaterThanOrEqual(0)'],
+          mustNotFlag: ['expect(rows.length).toBe(3)'],
+        },
+      }] },
+    };
+    const ctx = { harnessDir: d, repoRoot: d, testSrcRoots: [join(d, 'test')] };
+
+    const all = runChecker(cfg, ctx);
+    assert.deepEqual(all.offenders.map((o) => o.file).sort(), ['test/dropped.test.js', 'test/kept.test.js'],
+      'without a filter both files are scanned');
+
+    const scoped = runChecker(cfg, { ...ctx, fileFilter: (f) => f.endsWith('kept.test.js') });
+    assert.deepEqual(scoped.offenders.map((o) => o.file), ['test/kept.test.js'],
+      'with a filter only the admitted file is scanned');
+
+    const none = runChecker(cfg, { ...ctx, fileFilter: () => false });
+    assert.deepEqual(none.offenders, [], 'a filter that admits nothing yields no offenders');
+    assert.equal(none.ok, true, 'and the run is clean, not failed');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

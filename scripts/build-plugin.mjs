@@ -35,7 +35,7 @@ export function copyPlan() {
 export function pluginManifest() {
   return JSON.stringify({
     name: 'gutcheck',
-    description: 'Prove your AI-written tests actually test your code — a fast, diff-scoped mutation probe that guts each tested function and reports the tests that don\'t notice, plus a self-testing deterministic checker that fails closed unless it catches its own planted bugs.',
+    description: 'Guts each changed function with a guaranteed-wrong return and reruns only that function\'s own tests, then reports proven, hollow, one-sided, unverifiable, or no binding test with a replayable receipt. Ships a self-testing deterministic checker that refuses to run unless it catches its own planted bugs.',
     version: PKG.version,
     author: { name: 'the Gutcheck authors' },
     license: 'MIT',

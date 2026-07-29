@@ -15,118 +15,64 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, cpSync, rmSync, symlinkSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execSync, execFileSync, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { grossBreak, grossBreakOpposite, hasFirstParamIdentityBranch, passthroughBreak, jsDeclSites, jvmDeclSites, locateKotlinSite, pyDeclSiteCount } from './probe.mjs';
+import { execSync, execFileSync } from 'node:child_process';
+import { grossBreak, grossBreakOpposite, hasFirstParamIdentityBranch, passthroughBreak, jsDeclSites, jvmDeclSites, locateKotlinSite } from './probe.mjs';
 import { sutFnsIn } from './confirm.mjs';
 import { codeOnly } from '../checker/lexer.mjs';
 import { classifyChanges, hunkNewRanges, changedDecls } from './changes.mjs';
+import { loadAliasesCached, aliasBases } from './alias.mjs';
 import { selfEchoAssertion, titleSutCandidates } from './wrongLayerShadow.mjs';
 import { acquireRepoLock, reapStaleWork, markWorkOwned } from './lock.mjs';
+import { reEsc, balancedFrom, declRe, INSTANCE_RECEIVER_SKIP, instanceCallsIn, inferReceiverTypeFromCtor, pinnedFragmentsByKind, toPosix, canonKey } from './parse-utils.mjs';
+// Extracted to parse-utils.mjs; re-exported so every existing importer of prove.mjs is unaffected
+// (test/prove-exports.test.mjs pins that surface). pinnedFragmentsByKind is also imported above,
+// since eligibleFnsDetail/the JS instance resolver/prove() still call it locally.
+export { pinnedFragments, pinnedFragmentsByKind, braceArgFrom, topLevelComparisonSides, toPosix, canonKey } from './parse-utils.mjs';
+import { javaExe, mavenBin, mavenModuleDir, jvmSourceSetGate, gradleTaskInfo, parseGradleResults, mavenCompiled, resolveJvmSut, jvmInstanceSuts, resolveJvmClass, hasReachableSameNameFun, inferKotlinReceiverType, inferJavaReceiverType } from './jvm.mjs';
+// Extracted to mutation/jvm.mjs; re-exported so every existing importer of prove.mjs is unaffected
+// (test/prove-exports.test.mjs pins that surface). Also imported above: every one of the ten below
+// except jvmOwnPlainInstanceMember is still called by code remaining in this file, and
+// resolveJvmClass/hasReachableSameNameFun/inferKotlinReceiverType/inferJavaReceiverType (never
+// exported from prove.mjs — private to its own pin) back jvmInstanceContact's absence probe.
+export {
+  javaExe, mavenBin, mavenModuleDir, jvmSourceSetGate, gradleTaskInfo, parseGradleResults, mavenCompiled,
+  resolveJvmSut, jvmOwnPlainInstanceMember, jvmInstanceSuts,
+} from './jvm.mjs';
+import { RUNNER_LANGS, detectRunner, runOne } from './runners.mjs';
+// Extracted to mutation/runners.mjs; re-exported so every existing importer of prove.mjs is unaffected
+// (test/prove-exports.test.mjs pins that surface). Only RUNNER_LANGS/detectRunner/runOne are still
+// called by code remaining in this file. The rest (RUNNERS, resolveRunnerBin, fallbackCmdFor, testCmdFor,
+// parseRun, nodeEffectiveCounts) have no remaining call site in this file — re-export only.
+export {
+  RUNNERS, RUNNER_LANGS, detectRunner, resolveRunnerBin, fallbackCmdFor, testCmdFor, parseRun,
+  nodeEffectiveCounts, runOne,
+} from './runners.mjs';
+import { pyBlocks, resolvePySut, resolvePyClassMember } from './python-resolve.mjs';
+// Extracted to mutation/python-resolve.mjs; re-exported so every existing importer of prove.mjs is
+// unaffected (test/prove-exports.test.mjs pins that surface). pyBlocks/resolvePySut/resolvePyClassMember
+// are still called by code remaining in this file (the Python block loop below), so both the plain
+// import above and the re-export are needed. pythonExe is ALSO pinned on prove.mjs's surface (it was
+// public there before any extraction — test/prove-exports.test.mjs's SURFACE list, captured before any
+// export moved, already includes it) but has no remaining call site here now that pyBlocks/pyMemberOk
+// (its only callers in this file) moved out with it — re-export only, no plain import.
+export { pyBlocks, resolvePySut, resolvePyClassMember, pythonExe } from './python-resolve.mjs';
+import { formatReport } from './report.mjs';
+// Extracted to mutation/report.mjs; re-exported so every existing importer of prove.mjs is unaffected
+// (test/prove-exports.test.mjs pins that surface). formatReport is also imported above since main()
+// below still calls it directly; oneSidedLines/extraHollowOf have no remaining call site in this file
+// now that formatFullScanReport/formatDiffReport (their only callers) moved out with them — re-export
+// only, no plain import.
+export { formatReport, oneSidedLines, extraHollowOf } from './report.mjs';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.claude', 'dist', 'build', '.gradle', 'target', 'vendor', '.venv', 'venv', '__pycache__', 'out', 'coverage', '.next', '.svelte-kit', '.vite']);
 const DEFAULT_TIMEOUT_MS = Number(process.env.GUTCHECK_PROBE_TIMEOUT_MS) || 60000;
-const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// ---- path identity discipline (win32 root cause A) ----
-// Canonical comparison key: resolves symlinks AND Windows 8.3 short names (realpathSync.native —
-// plain realpathSync does NOT expand short names; evidence: diagnose run 28703534698, boundary A1,
-// where join()'d and realpath'd forms of the SAME file disagreed because one round-tripped through the
-// 8.3 short `RUNNER~1` form), then folds case on win32 (case-insensitive FS). Falls back to resolve(p)
-// when the path doesn't exist (a deleted file from a diff, e.g.) rather than throwing. NEVER render
-// this value — it is a comparison key only; display paths use toPosix below, never canonKey.
-export function canonKey(p) {
-  try { p = (realpathSync.native || realpathSync)(p); } catch { p = resolve(p); }
-  return process.platform === 'win32' ? p.toLowerCase() : p;
-}
-// Every relative/display path is normalized to POSIX at creation — git, the runners, and this tool's
-// own JSON/report consumers all accept '/' on win32, so downstream code never has to care which
-// platform produced the path (evidence: diagnose run 28703534698, boundary A2 — a backslash path never
-// matched a forward-slash-anchored dir-boundary regex).
-export const toPosix = (p) => p.split('\\').join('/');
-
-// Python interpreter, resolved ONCE: some systems ship `python3` but no bare `python`. Used for BOTH the
-// pytest command and the stdlib-ast block helper, so they agree. null when neither is on PATH (→ the
-// Python ast precision path is skipped and the regex Python branch is used as the fallback).
-const PY_HELPER = fileURLToPath(new URL('./py_blocks.py', import.meta.url));
-let _pyExe; // memoized: 'python3' | 'python' | null
-export function pythonExe() {
-  if (_pyExe !== undefined) return _pyExe;
-  _pyExe = null;
-  for (const exe of ['python3', 'python']) {
-    try { execFileSync(exe, ['--version'], { stdio: 'ignore' }); _pyExe = exe; break; } catch {}
-  }
-  return _pyExe;
-}
-
-// java, resolved ONCE: JAVA_HOME/bin/java if present+runnable, else `java` on PATH, else null (→ gradle/
-// maven probing is skipped, never a crash). Mirrors pythonExe(). Both JVM wrappers need a JDK anyway.
-let _javaExe;
-export function javaExe() {
-  if (_javaExe !== undefined) return _javaExe;
-  _javaExe = null;
-  const cands = [];
-  if (process.env.JAVA_HOME) cands.push(join(process.env.JAVA_HOME, 'bin', 'java'));
-  cands.push('java');
-  for (const exe of cands) {
-    try { execFileSync(exe, ['-version'], { stdio: 'ignore' }); _javaExe = exe; break; } catch {}
-  }
-  return _javaExe;
-}
 // Reap orphaned prove() work copies at most ONCE per process (mutation/lock.mjs's reapStaleWork):
 // gutcheck.mjs's --since-unresolvable and empty-scope full-suite fallbacks re-enter prove() up to
 // twice in the same CLI process, and this module's own callers (tests, main()'s retries) may call
 // prove() far more than that — the tmpdir sweep is startup hygiene, not per-run work, so repeating
 // it inside one process only pays its cost (a full tmpdir readdir) again for zero extra benefit.
 let staleWorkReaped = false;
-// mvn binary resolution — mirrors javaExe()'s discipline (every candidate is actually EXECUTED and
-// validated before being trusted, never just assumed present): an explicit override
-// (GUTCHECK_MVN — an absolute path to an mvn binary) wins first, then `mvn` on PATH, then the project's
-// own Maven Wrapper jar (java -cp <dir>/.mvn/wrapper/maven-wrapper.jar
-// org.apache.maven.wrapper.MavenWrapperMain — no mvnw script, same win32-EINVAL-safe argv-exec
-// discipline resolveRunnerBin/the gradle wrapper use: no shell, no shim). The validation env derives
-// JAVA_HOME from javaExe() first (exactly as runOne does for the real invocation below) so the `-v`
-// preflight can't spuriously fail on a box where `mvn` needs JAVA_HOME set but the ambient process env
-// doesn't have it. Returns { cmd, pre } (pre = leading args before the maven goal args, [] for a direct
-// mvn invocation) or null when nothing is resolvable at all — callers must then fail closed (skip the
-// block, never a verdict), exactly like an absent java/python interpreter. Deliberately NOT memoized
-// (unlike javaExe/pythonExe): GUTCHECK_MVN and `dir` legitimately vary per call/test (a per-block probe
-// loop always passes the same `dir`, so the repeat `-v` cost is one small subprocess per test run, not
-// per mutant — accepted for correctness/testability over that constant-factor cost).
-export function mavenBin(dir) {
-  const env = { ...process.env };
-  const j = javaExe();
-  if (j && j !== 'java' && !env.JAVA_HOME) env.JAVA_HOME = dirname(dirname(j));
-  const tryBin = (cmd) => { try { execFileSync(cmd, ['-v'], { stdio: 'ignore', env }); return true; } catch { return false; } };
-  if (process.env.GUTCHECK_MVN && tryBin(process.env.GUTCHECK_MVN)) return { cmd: process.env.GUTCHECK_MVN, pre: [] };
-  if (tryBin('mvn')) return { cmd: 'mvn', pre: [] };
-  const wrapper = join(dir, '.mvn', 'wrapper', 'maven-wrapper.jar');
-  if (j && existsSync(wrapper)) return { cmd: j, pre: ['-cp', wrapper, 'org.apache.maven.wrapper.MavenWrapperMain'] };
-  return null;
-}
-// Nearest ancestor dir (at or above the test file, never above the repo root `dir`) containing pom.xml —
-// the Maven module that OWNS the test, mirroring gradleTaskInfo's module resolution for Gradle. Maven
-// modules aren't guaranteed to align with a `/src/` path segment the way Gradle's do, so this walks the
-// real pom.xml files on disk instead of a string convention. Single-module repos (root itself is the only
-// pom.xml) resolve to `dir` — either via the loop finding root's own pom.xml, or via the `return dir`
-// fallback when it doesn't (e.g. a trailing separator on `dir` shortens the walked-up root string below
-// `dir.length` by exactly the separator's one char, so the loop exits one step early) — both give the SAME
-// directory, so the rewire is behavior-neutral for every single-module repo that worked under v1. The
-// `d.length >= dir.length` guard can never straddle `dir`: each dirname() step removes a whole path
-// segment (name + separator, ≥2 chars) except the very last step onto `dir` itself, so the only length
-// that can fall short of `dir.length` by a single char is `dir` with its separator stripped — never a
-// directory above it. Verified for exactly this (nested modules, no-pom fallback, a decoy pom.xml planted
-// ABOVE the root, and a trailing-separator `dir`) in test/maven-runner.test.mjs.
-export function mavenModuleDir(dir, testFileRel) {
-  let d = dirname(join(dir, testFileRel));
-  while (d.length >= dir.length) {
-    if (existsSync(join(d, 'pom.xml'))) return d;
-    const parent = dirname(d);
-    if (parent === d) break;
-    d = parent;
-  }
-  return dir;
-}
 
 function walk(dir, acc = []) {
   let ents; try { ents = readdirSync(dir, { withFileTypes: true }); } catch { return acc; }
@@ -161,325 +107,6 @@ export function changedFilesSince(dir, ref) {
   return set;
 }
 
-// ---- runner abstraction ----
-export function detectRunner(dir) {
-  let pkg = {}; try { pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); } catch {}
-  // The test script is the strongest signal of the runner a repo ACTUALLY uses — devDependencies can
-  // carry other runners as fixtures or tooling (this repo does). Deps order stays as the fallback.
-  const script = (pkg.scripts && typeof pkg.scripts.test === 'string') ? pkg.scripts.test : '';
-  if (/\bvitest\b/.test(script)) return 'vitest';
-  if (/\bjest\b/.test(script)) return 'jest';
-  if (/\bmocha\b/.test(script)) return 'mocha';
-  if (/\bava\b/.test(script)) return 'ava';
-  if (/\bpytest\b/.test(script)) return 'pytest';
-  if (/\bnode\s+--test\b/.test(script)) return 'node';
-  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-  if (deps.vitest) return 'vitest';
-  if (deps.jest) return 'jest';
-  if (deps.mocha) return 'mocha';
-  if (deps.ava) return 'ava';
-  if (['pyproject.toml', 'setup.py', 'pytest.ini', 'tox.ini'].some((m) => existsSync(join(dir, m)))) return 'pytest';
-  if (['settings.gradle', 'settings.gradle.kts', 'build.gradle', 'build.gradle.kts'].some((m) => existsSync(join(dir, m)))) return 'gradle';
-  // Maven: checked AFTER gradle, so a repo carrying both marker sets (rare) keeps gradle — the gradle
-  // branch above already returned by this point whenever a gradle marker exists.
-  if (existsSync(join(dir, 'pom.xml'))) return 'maven';
-  return 'node';
-}
-// Runner IDs — the single source of truth: detectRunner only ever returns one of these, and the
-// completeness meta-test (test/prove.test.mjs) iterates this list to guarantee every entry has both a
-// testCmdFor command spec and (except gradle and maven, which read JUnit XML via parseGradleResults
-// instead) a parseRun branch, backed by a fixture.
-export const RUNNERS = ['vitest', 'jest', 'mocha', 'ava', 'pytest', 'node', 'gradle', 'maven'];
-// Languages each runner can actually execute — the runner-mismatch gate's single source of truth.
-// One runner is detected per repo (detectRunner), but a repo can carry test files that runner cannot
-// run (a Maven fixture inside a JS repo, a stray .py in a gradle repo). Running them anyway 'fails'
-// the baseline and mints a false already-failing verdict.
-export const RUNNER_LANGS = {
-  vitest: ['js'], jest: ['js'], mocha: ['js'], ava: ['js'], node: ['js'],
-  pytest: ['python'],
-  gradle: ['kotlin', 'java'], maven: ['kotlin', 'java'],
-};
-
-// ---- runner bin resolution (win32 root cause B) ----
-// spawnSync('npx.cmd') throws EINVAL on patched Node (CVE-2024-27980) and a bare `npx` is ENOENT on
-// win32 (no shim named that), so npx-based invocation cannot work there without shell:true — forbidden.
-// The fix: resolve the runner package's own JS bin entry (the very file the npx shim would have execed)
-// and spawn it directly with `process.execPath` — an argv-exec, no shell, no shim, on every platform.
-// Walks from `dir` up to the filesystem root looking for node_modules/<pkg>/package.json; the FIRST
-// ancestor that has one wins (mirrors node's own module resolution — a nearer node_modules shadows any
-// further up) whether or not its `bin` field ultimately resolves to something. `bin` is either a string
-// (single-bin packages: jest ships `bin/jest.js`) or an object keyed by command name (multi-bin: vitest
-// ships `{vitest: "vitest.mjs"}`, mocha ships BOTH `{mocha: "bin/mocha.js", _mocha: "bin/_mocha"}` — only
-// the `mocha`-named entry is wanted — and ava ships `{ava: "entrypoints/cli.mjs"}`); take the entry named
-// exactly `pkg`, else the object's first value (a package that doesn't name its own bin after itself
-// still needs *a* value). Returns the absolute resolved path, or null if no ancestor has the package.
-export function resolveRunnerBin(runner, dir) {
-  let d = resolve(dir);
-  for (;;) {
-    const pkgDir = join(d, 'node_modules', runner);
-    const pkgJson = join(pkgDir, 'package.json');
-    if (existsSync(pkgJson)) {
-      try {
-        const bin = JSON.parse(readFileSync(pkgJson, 'utf8')).bin;
-        let rel = null;
-        if (typeof bin === 'string') rel = bin;
-        else if (bin && typeof bin === 'object') rel = Object.prototype.hasOwnProperty.call(bin, runner) ? bin[runner] : Object.values(bin)[0];
-        return rel ? resolve(pkgDir, rel) : null;
-      } catch { return null; }
-    }
-    const parent = dirname(d);
-    if (parent === d) return null; // reached the filesystem root — never found it
-    d = parent;
-  }
-}
-// The two shapes testCmdFor falls back to when resolveRunnerBin found nothing, isolated into a pure
-// function of a boolean so BOTH platform branches are unit-testable on any single host (no platform
-// injection/mocking — the plan's no-untestable-claims rule). Non-win32: `npx <runner>` is still useful
-// when the runner is installed globally rather than locally resolvable — npx CAN be spawned there, this
-// is just belt-and-suspenders for a repo without a local install. win32: npx can't be spawned at all
-// (see the root-cause comment above), so a deliberately-failing, crash-proof sentinel is used instead —
-// `node -e process.exit(1)` produces no output, parseRun reads 0 passed/0 failed from that empty output,
-// and prove()'s baseline gate turns a 0p/0f "run" into `inconclusive` (never a crash, never a false
-// HOLLOW/CAUGHT verdict) — the honest can't-actually-run-this-locally signal.
-export function fallbackCmdFor(runner, isWin32) {
-  if (isWin32) return { cmd: process.execPath, args: ['-e', 'process.exit(1)'] };
-  return { cmd: 'npx', args: [runner] };
-}
-// Resolve the gradle task + results dir for the module owning a test file. The module dir is the path
-// segment before `/src/` (''=root). A module applying AGP (com.android.application|library) runs local
-// unit tests via testDebugUnitTest with XML under <module>/build/test-results/testDebugUnitTest/; a plain
-// JVM (kotlin("jvm")/java) module uses `test`. Task paths are module-qualified (`:core:contract:test`)
-// so a multi-module build runs (and reports) only the owning module. Gradle auto-generates `clean<Task>`.
-// JVM source-set gate: which src/<set>/ test files the probe can actually run. `test` (plain JVM +
-// Android local units) and `jvmTest` (KMP's JVM target) are supported. `androidTest` is INSTRUMENTED —
-// device/emulator, minutes per mutant, outside the one-fast-rerun model. Every other *Test source set
-// (commonTest, iosTest, …) has no supported single-target task. Returns the skip reason, or null for a
-// supported (or non-source-set) path. The prove loop applies this PRE-baseline: zero gradle runs, an
-// explicit reason per block, never an inconclusive noise row (measured before the gate: gamedge burned 9
-// baselines on androidTest files, cc-pocket 8 on KMP sets).
-// A module demonstrably has a KMP JVM target when it declares `jvm()` / `jvm {` in its build file
-// (line-anchored — the kotlin{} DSL indents it) or carries a src/jvmTest dir. Used to decide whether
-// commonTest maps to the jvmTest task (below) or fails closed.
-function kmpJvmTargetExists(dir, relPosix) {
-  const i = relPosix.indexOf('/src/');
-  const moduleDir = i > 0 ? relPosix.slice(0, i) : '';
-  if (existsSync(join(dir, moduleDir, 'src', 'jvmTest'))) return true;
-  for (const b of ['build.gradle.kts', 'build.gradle']) {
-    try { if (/^\s*jvm\s*[({]/m.test(readFileSync(join(dir, moduleDir, b), 'utf8'))) return true; } catch {}
-  }
-  return false;
-}
-
-export function jvmSourceSetGate(relPosix, dir = null) {
-  const m = /(?:^|\/)src\/([A-Za-z0-9]+)\//.exec(relPosix);
-  if (!m) return null;
-  const set = m[1];
-  if (set === 'test' || set === 'jvmTest') return null;
-  if (set === 'androidTest') return 'instrumented-test';
-  // commonTest EXECUTES under the module's jvmTest task when a JVM target exists (KMP compiles common
-  // test sources into every target's test compilation) — the dominant idiom keeps shared tests here
-  // (wild specimen cc-pocket). Without dir context or without a JVM target: fail closed.
-  if (set === 'commonTest') return (dir && kmpJvmTargetExists(dir, relPosix)) ? null : 'unsupported-source-set';
-  if (/Test$/.test(set)) return 'unsupported-source-set';
-  return null;
-}
-
-export function gradleTaskInfo(dir, testFileRel) {
-  const rel = toPosix(testFileRel);
-  const i = rel.indexOf('/src/');
-  const moduleDir = i > 0 ? rel.slice(0, i) : '';
-  // KMP: a src/jvmTest/ file runs via the module's `jvmTest` task (results at build/test-results/jvmTest,
-  // same JUnit XML the correctness spine reads). Checked BEFORE android detection — a KMP module with an
-  // android target still runs its JVM-target tests through jvmTest, never testDebugUnitTest (wild
-  // specimen: heypandax/cc-pocket :protocol, where `test` 0-matched and burned a baseline per block).
-  // Anchored like jvmSourceSetGate's regex: a ROOT-module KMP rel has no leading slash
-  // (src/jvmTest/..., wild specimen sunny-chung/giant-log-viewer), so a bare '/src/jvmTest/'
-  // substring match misses it and falls through to the nonexistent `test` task.
-  if (/(?:^|\/)src\/jvmTest\//.test(rel) || (/(?:^|\/)src\/commonTest\//.test(rel) && kmpJvmTargetExists(dir, rel))) {
-    const prefix = moduleDir ? ':' + moduleDir.split('/').join(':') + ':' : '';
-    return { unitTask: 'jvmTest', taskPath: prefix + 'jvmTest', cleanPath: prefix + 'cleanJvmTest', resultsDir: join(moduleDir, 'build', 'test-results', 'jvmTest') };
-  }
-  let isAndroid = false;
-  for (const b of ['build.gradle.kts', 'build.gradle']) {
-    const p = join(dir, moduleDir, b);
-    // AGP detection, two signals: the literal plugin id (`id("com.android.application")` / groovy apply) OR —
-    // the modern version-catalog idiom (`alias(libs.plugins.android.application)`, wild specimen
-    // lnxgod/friendorfoe) where the literal id lives only in libs.versions.toml — the mandatory top-level
-    // `android { }` extension block, which every AGP module carries regardless of declaration style. The
-    // block scan is LINE-ANCHORED so `android` in a comment (`// android {`) or an indented string can't
-    // flip a plain-JVM module (a wrong android flag costs only a 0-match → inconclusive — precision-safe —
-    // but detection stays honest). Known residual: convention-plugin indirection (module has neither the id
-    // nor its own android block) still falls back to `test` → the AGP aggregate task rejects `--tests` →
-    // 0p/0f → inconclusive; never a wrong verdict.
-    try {
-      const text = readFileSync(p, 'utf8');
-      if (/com\.android\.(application|library)/.test(text) || /^\s*android\s*\{/m.test(text)) { isAndroid = true; break; }
-    } catch {}
-  }
-  const unitTask = isAndroid ? 'testDebugUnitTest' : 'test';
-  const cap = unitTask[0].toUpperCase() + unitTask.slice(1);
-  const prefix = moduleDir ? ':' + moduleDir.split('/').join(':') + ':' : '';
-  return {
-    unitTask,
-    taskPath: prefix + unitTask,
-    cleanPath: prefix + 'clean' + cap,
-    resultsDir: join(moduleDir, 'build', 'test-results', unitTask),
-  };
-}
-// Returns an argv spec { cmd, args } — NEVER a shell string. runOne execs it via spawnSync (no shell),
-// so a test name containing shell-special characters (backtick, `$(...)`, quotes, …) is passed as a
-// literal argument the shell never parses. reEsc(name) is REGEX escaping (still needed for node's
-// --test-name-pattern and the vitest/jest -t regex matchers), not shell quoting.
-// mocha's --grep IS a regex (reEsc it); ava's -m is a GLOB, not a regex — pass the RAW name, never reEsc.
-// `dir` is the project root runOne is about to spawn IN (its cwd) — resolveRunnerBin walks up from there
-// to find the runner's real local install. Defaults to process.cwd() for callers (unit tests, mainly)
-// that don't have a project dir in scope; an unresolvable bin still falls through to the fallback shapes
-// above exactly as if dir had never existed.
-// `qualified` (default false): true when `name` is already a describe-QUALIFIED full name (prove()'s
-// residual-ambiguity resolution — see qualifiedName/residualAmbiguous), not a bare title. Only mocha's
-// branch consumes it: its qualified selection must be ANCHORED (`^...$`) — empirically verified (see the
-// mocha e2e) that an anchored qualified pattern selects exactly one nested test, where the unanchored
-// bare form does not. node's pattern is unconditionally anchored already regardless of `qualified` (no
-// branch needed); vitest/jest's qualified form stays unanchored — the longer, more specific string is
-// sufficient on its own (also empirically verified) — so neither reads this flag. Node's own full-name
-// match only exists on v22+ — v20 fails this qualified selection closed instead (see the NODE VERSION
-// CAVEAT on qualifiedName below).
-// `gradleTask` (6th param, default the root module's plain `test` task): the {taskPath,cleanPath,
-// resultsDir} shape gradleTaskInfo() returns — prove()'s caller computes it per-file via gradleTaskInfo
-// and passes it through; unit tests / callers with no project on disk get a valid root-`test` argv from
-// the default alone.
-export function testCmdFor(runner, file, name, dir = process.cwd(), qualified = false,
-    gradleTask = { taskPath: 'test', cleanPath: 'cleanTest', resultsDir: 'build/test-results/test' }) {
-  if (runner === 'gradle') {
-    // java -cp <wrapper.jar> org.gradle.wrapper.GradleWrapperMain <cleanTask> <task> --tests <FQN>
-    //   --offline --console=plain -Dorg.gradle.vfs.watch=false — no gradlew script (win32 .bat
-    //   EINVAL-safe); cleanTask forces rerun (Gradle's up-to-date test-skip is real); --tests takes the
-    //   class-qualified FQN literally. -Dorg.gradle.vfs.watch=false kills the vfs-watch race at its
-    //   source (field report 2026-07-18): the probe's out-of-band mutant write can be missed by the
-    //   daemon's virtual filesystem watcher, so a main-source compile task goes UP-TO-DATE despite
-    //   changed source and the test reruns against STALE classes — a fresh-green survivor read off a
-    //   build that never saw the mutant. System-property form deliberately, not `--no-watch-fs`: an
-    //   unrecognized -D property is silently ignored by a Gradle version that predates it, while
-    //   `--no-watch-fs` is a hard CLI parse error on Gradle < 6.7 — see mainCompileExecuted below for the
-    //   belt-and-suspenders evidence gate that catches the race even where this flag can't (an old
-    //   Gradle that ignores it).
-    // NO --build-cache (removed, same field report): it made the race's failure mode WORSE, not better.
-    // The local build cache is content-addressable and LOCATION-independent by design — that's its whole
-    // point — so it satisfies a task from ANY prior build of byte-identical content, including a totally
-    // separate probe invocation against a different temp work copy (e.g. the Stop hook re-firing on an
-    // unchanged diff, or a user re-running gutcheck). A within-one-run repeat gut of the same fn (two
-    // test blocks covering it) is still fast via Gradle's own always-on incremental build and is proven
-    // safe by the lastCompiled memo below (this run watched it compile); --build-cache's only
-    // ADDITIONAL effect was reusing output ACROSS separate invocations, which mainCompileExecuted cannot
-    // tell apart from the race (both look identically UP-TO-DATE/FROM-CACHE) — so keeping it enabled
-    // would silently mask real hollow findings on any repeat run. A live 2-invocation repro (probe the
-    // same uncommitted diff twice) confirmed this: with --build-cache, the second invocation's genuine
-    // survivors all read back 'ungutable' instead of their real verdict.
-    const wrapper = join(dir, 'gradle', 'wrapper', 'gradle-wrapper.jar');
-    return { cmd: javaExe() || 'java', args: ['-cp', wrapper, 'org.gradle.wrapper.GradleWrapperMain',
-      gradleTask.cleanPath, gradleTask.taskPath, '--tests', name, '--offline', '--console=plain', '-Dorg.gradle.vfs.watch=false'] };
-  }
-  if (runner === 'maven') {
-    // mvn -o test -Dtest=<Class>#<method> -Dsurefire.failIfNoSpecifiedTests=false  — offline (mirrors
-    // gradle's --offline); the FQN's LAST dot becomes '#' (Gradle's --tests takes a dotted FQN, Maven's
-    // -Dtest takes Class#method); -Dsurefire.failIfNoSpecifiedTests=false is MANDATORY — without it a
-    // zero-match -Dtest FAILS the build (verified live), which would misread as a test failure rather
-    // than the honest zero-match green that mirrors gradle's own 0-match behavior.
-    const mb = mavenBin(dir);
-    // No mvn resolvable at all (no override, none on PATH, no wrapper jar): a deliberately-failing,
-    // crash-proof sentinel — same idiom as fallbackCmdFor's win32 branch. Produces no output, so
-    // parseGradleResults(dir) reads {0,0} from the (freshly emptied) results dir and prove()'s baseline
-    // gate routes the block to inconclusive — never a crash, never a false verdict.
-    if (!mb) return { cmd: process.execPath, args: ['-e', 'process.exit(1)'] };
-    const fq = name.replace(/\.([^.]+)$/, '#$1');
-    return { cmd: mb.cmd, args: [...mb.pre, '-o', 'test', '-Dtest=' + fq, '-Dsurefire.failIfNoSpecifiedTests=false'] };
-  }
-  if (runner === 'vitest' || runner === 'jest' || runner === 'mocha' || runner === 'ava') {
-    // The args a resolved/fallback-npx invocation both share — everything AFTER the package name/bin path.
-    const runnerArgs = runner === 'vitest' ? ['run', file, '-t', reEsc(name)]
-      : runner === 'jest' ? [file, '-t', reEsc(name), '--runInBand']
-      : runner === 'mocha' ? [file, '--reporter', 'tap', '--grep', qualified ? ('^' + reEsc(name) + '$') : reEsc(name)]
-      : [file, '--tap', '-m', name]; // ava: -m is a glob, not a regex — RAW name, never reEsc
-    const bin = resolveRunnerBin(runner, dir);
-    if (bin) return { cmd: process.execPath, args: [bin, ...runnerArgs] };
-    const isWin32 = process.platform === 'win32';
-    const fb = fallbackCmdFor(runner, isWin32);
-    return isWin32 ? fb : { cmd: fb.cmd, args: [...fb.args, ...runnerArgs] };
-  }
-  if (runner === 'pytest') return { cmd: pythonExe() || 'python', args: ['-m', 'pytest', file, '-k', name, '-q'] };
-  // --test-reporter=tap is MANDATORY, not cosmetic: Node >=23 flipped the default `node --test` reporter
-  // tap->spec (even for non-TTY stdout). The spec reporter prints `ℹ pass 1`, which parseRun and
-  // nodeEffectiveCounts (TAP-only: `# pass N`, `1..0`, `ok N - <file>`) cannot read, so every node-runner
-  // verdict parses 0p/0f — the self-check's planted sound test is never caught and gutcheck refuses to run
-  // (issue #4). `--test-reporter` exists on every Node this package supports (>=20), so pin it
-  // unconditionally — the node analog of mocha's `--reporter tap` / ava's `--tap` above.
-  return { cmd: 'node', args: ['--test', '--test-reporter=tap', '--test-name-pattern', '^' + reEsc(name) + '$', file] };
-}
-// {passed, failed} from the runner SUMMARY — never the exit code (a zero-match run is green).
-// parseRun always receives stdout+stderr CONCATENATED IN THAT ORDER (runOne), and these regexes are
-// non-global .exec() — leftmost match wins. So stray summary-shaped text on stderr can only win when
-// stdout has NO match at all (the jest case, whose summary IS on stderr). Keep that ordering.
-export function parseRun(runner, out) {
-  // LAST match wins, never the first: the runner's real summary comes at the END of the output, and a
-  // test's own stdout can legally contain summary-shaped lines before it (`console.log('# fail 0')`,
-  // TAP-ish progress from tools under test). A leftmost match let that spoof the verdict — a reproduced
-  // false-HOLLOW vector (and symmetrically a false-CAUGHT one), closed by taking the final occurrence.
-  const last = (re) => { let m = null; for (const x of out.matchAll(re)) m = x; return m; };
-  if (runner === 'node' || runner === 'mocha' || runner === 'ava') { const p = last(/#\s*pass\s+(\d+)/g); const f = last(/#\s*fail\s+(\d+)/g); return { passed: p ? +p[1] : 0, failed: f ? +f[1] : 0 }; }
-  const p = last(/(\d+) passed/g); const f = last(/(\d+) failed/g); return { passed: p ? +p[1] : 0, failed: f ? +f[1] : 0 };
-}
-// Discount a node run whose green is attributable ONLY to node's own file-wrapper subtest point,
-// never to any selected test — closes the node zero-match false-HOLLOW vector at the runtime layer
-// (see the runOne call site and the MASKING GUARD comment on DESCRIBE_HEAD_RE above for the two ways
-// a selector can zero-match: a corrupted/ambiguous pattern, or a genuinely dead block such as
-// describe.skip). When `--test-name-pattern` matches nothing in the given file, node still exits 0
-// and reports `# pass 1`: TAP's own plan line proves it (`1..0` — zero subtests scheduled), and the
-// single passing point is `ok N - <file>`, node's synthetic wrapper for "this file ran without
-// error", named after the file argument verbatim — never a real test's title. (Empirically verified
-// on node v22.22.2, both a non-matching --test-name-pattern and a describe.skip'd-away test: see
-// test/fixtures/runner-output/node-zero-match.txt / node-one-match.txt and their README.) When a
-// real test DOES match, node reports that test's own title directly — no separate wrapper line
-// appears — so this helper only ever fires on a genuinely zero-match run.
-// Only ever moves a run TOWARD inconclusive (every caller in runOne routes {0,0} there — see the
-// baseline/survivor/recheck/deep gates in prove()); never mints a CAUGHT (requires failed > 0, and
-// this function returns unchanged whenever failed > 0) or a HOLLOW (requires passed > 0 after this
-// runs). Known fail-closed-direction miss: a real test literally TITLED the file's own relative path
-// would be mis-coerced to 0p/0f too — accepted, since the alternative direction (a wrapper point
-// counted as a real pass) is the false-HOLLOW vector this exists to close.
-export function nodeEffectiveCounts(counts, out, file) {
-  if (counts.failed > 0 || counts.passed < 1) return counts; // never touches a failing/empty run
-  // Primary evidence, path-spelling-agnostic: node emits a column-0 `1..0` plan BEFORE the wrapper
-  // point on every zero-match run (zero subtests scheduled — see node-zero-match.txt). The wrapper-
-  // NAME match below cannot know every platform's path spelling: on Windows the wrapper is named by
-  // a path form outside both rel-path variants (CI run 29116683747 minted a false HOLLOW from a
-  // describe.skip fixture exactly this way). Nested subtest plans are indented, so column-0 `1..0`
-  // can only be the top-level scheduled count; `\r?` keeps CRLF output covered.
-  if (/^1\.\.0\r?$/m.test(out)) return { passed: 0, failed: 0 };
-  const forms = [...new Set([file, file.split('/').join('\\')])].map(reEsc);
-  const wrapRe = new RegExp(`^ok \\d+ - (?:${forms.join('|')})\\s*$`, 'gm');
-  const wrappers = (out.match(wrapRe) || []).length;
-  return counts.passed <= wrappers ? { passed: 0, failed: 0 } : counts;
-}
-// {passed, failed} from the JUnit XML Gradle writes to build/test-results/<task>/TEST-*.xml — the
-// framework-agnostic signal (JUnit4/5/kotlin.test all emit it). Gradle's console carries NO pass/fail
-// count, so this is the gradle analog of parseRun. Sums every <testsuite> opening tag's attributes
-// (attr order-independent; "testsuite" contains "tests" but the required `="` disambiguates). A missing
-// dir / no files → {0,0} → prove()'s baseline gate routes to inconclusive (never a stale or wrong read).
-export function parseGradleResults(dir) {
-  let files;
-  try { files = readdirSync(dir).filter((f) => f.startsWith('TEST-') && f.endsWith('.xml')); }
-  catch { return { passed: 0, failed: 0 }; }
-  const attr = (tag, name) => { const m = new RegExp(name + '="(\\d+)"').exec(tag); return m ? +m[1] : 0; };
-  let tests = 0, skipped = 0, failures = 0, errors = 0;
-  for (const f of files) {
-    let xml; try { xml = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
-    for (const tm of xml.matchAll(/<testsuite\b[^>]*>/g)) {
-      tests += attr(tm[0], 'tests'); skipped += attr(tm[0], 'skipped');
-      failures += attr(tm[0], 'failures'); errors += attr(tm[0], 'errors');
-    }
-  }
-  return { passed: tests - skipped - failures - errors, failed: failures + errors };
-}
 // Field report 2026-07-18 (false-positive hollow, AcoustiQ): `compiled === false` and an empty {0,0}
 // result are both already gated (see the callers below), but a THIRD shape leaked one past them — a
 // gradle daemon vfs-watch race can miss the probe's out-of-band mutant write, so the main-source compile
@@ -539,102 +166,8 @@ export function survivorEvidenceValid(r, sutRel, content, lastCompiled) {
   if (r.failed > 0 || r.passed === 0) return true;
   return executed || lastCompiled.get(sutRel) === content;
 }
-// Maven's compile-fail signal, DISTINCT from a failing test — verified live on both real shapes (see
-// test/fixtures/runner-output/maven-{compile,test}-fail.txt): a non-compiling mutant prints "[ERROR]
-// COMPILATION ERROR :" (and never reaches surefire, so no fresh XML exists — parseGradleResults reads
-// {0,0}); a FAILING TEST prints "Tests run: N, Failures: M" + BUILD FAILURE but NEVER COMPILATION ERROR.
-// Both print BUILD FAILURE, so that string alone can't tell them apart — COMPILATION ERROR is the only
-// safe discriminator. Exported as its own pure function (unlike gradle's inline regex in runOne) because
-// maven has no CI binary at all — this is the only CI-safe coverage for the false-verdict-critical
-// classification (see test/maven-runner.test.mjs, driven off the captured fixture text above).
-export function mavenCompiled(out) { return !/COMPILATION ERROR/.test(out); }
-export function runOne(cwd, runner, file, name, timeoutMs, qualified = false) {
-  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
-  if (runner === 'gradle') {
-    const gi = gradleTaskInfo(cwd, file);
-    const resultsAbs = join(cwd, gi.resultsDir);
-    rmSync(resultsAbs, { recursive: true, force: true });   // guarantee no stale XML → fresh-read invariant
-    // Ensure the daemon has a JDK even when JAVA_HOME is unset (we spawn `java`, but the wrapper's daemon
-    // resolves its own JVM); derive JAVA_HOME from the resolved java when absent.
-    const j = javaExe();
-    if (j && j !== 'java' && !env.JAVA_HOME) env.JAVA_HOME = dirname(dirname(j));
-    const { cmd, args } = testCmdFor('gradle', file, name, cwd, qualified, gi);
-    const r = spawnSync(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL', env, encoding: 'utf8' });
-    const out = (r.stdout || '') + (r.stderr || '');
-    // Gradle task-names a Kotlin/JVM-plugin compile task plainly (`compileKotlin`/`compileJava`) but AGP
-    // qualifies it by build variant (`compileDebugKotlin`, `compileDebugJavaWithJavac`, …) — \w* either
-    // side of the keyword matches both without losing the anchor to a genuine compile task (a real
-    // Android module run surfaced this: a Kotlin type error on the SUT failed as `compileDebugKotlin
-    // FAILED`, which the plain-JVM-only pattern silently missed → false compiled=true).
-    const compiled = !/compile\w*(Kotlin|Java)\w*\s+FAILED/.test(out);
-    return { ...parseGradleResults(resultsAbs), compiled, out };
-  }
-  if (runner === 'maven') {
-    // Multi-module reactor support: mavenModuleDir walks up from the test file to the nearest ancestor
-    // pom.xml (root when none — single-module repos are byte-identical to v1, see mavenModuleDir's own
-    // comment), and the probe reads results from AND invokes mvn IN that owning module's directory —
-    // mirroring the gradle branch above, which already resolves its module via gradleTaskInfo. A
-    // submodule built in isolation whose reactor siblings aren't installed to the local repo (an
-    // unresolvable <parent>/inter-module dependency) fails the build here: no fresh XML, parseGradleResults
-    // reads {0,0}, and prove()'s baseline gate routes that straight to inconclusive — fail-closed, exactly
-    // like every other under-reach in this file, never a false verdict.
-    const moduleDir = mavenModuleDir(cwd, file);
-    const resultsAbs = join(moduleDir, 'target', 'surefire-reports');
-    rmSync(resultsAbs, { recursive: true, force: true });   // guarantee no stale XML → fresh-read invariant
-    const j = javaExe();
-    if (j && j !== 'java' && !env.JAVA_HOME) env.JAVA_HOME = dirname(dirname(j));
-    const { cmd, args } = testCmdFor('maven', file, name, moduleDir, qualified);
-    const r = spawnSync(cmd, args, { cwd: moduleDir, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL', env, encoding: 'utf8' });
-    const out = (r.stdout || '') + (r.stderr || '');
-    const compiled = mavenCompiled(out);
-    return { ...parseGradleResults(resultsAbs), compiled, out };
-  }
-  const { cmd, args } = testCmdFor(runner, file, name, cwd, qualified);
-  const r = spawnSync(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL', env, encoding: 'utf8' });
-  const out = (r.stdout || '') + (r.stderr || '');
-  let counts = parseRun(runner, out);
-  if (runner === 'node') counts = nodeEffectiveCounts(counts, out, file);
-  return { ...counts, out };
-}
 
 // ---- block parsing (JS/TS it()/test(), and pytest def test_*) ----
-function balancedFrom(s, openParen) { let d = 0, k = openParen; for (; k < s.length; k++) { const c = s[k]; if (c === '(') d++; else if (c === ')') { d--; if (!d) { k++; break; } } } return { arg: s.slice(openParen + 1, k - 1), end: k }; }
-// `{`-balanced analog of balancedFrom: the text inside the brace pair opening at body[idx], or null
-// when unbalanced. Callers pass MASKED text (codeOnly), so brace characters inside strings — including
-// Kotlin string templates — are already blanked and cannot desynchronize the depth count.
-export function braceArgFrom(body, idx) {
-  let depth = 0;
-  for (let i = idx; i < body.length; i++) {
-    if (body[i] === '{') depth++;
-    else if (body[i] === '}') { depth--; if (depth === 0) return body.slice(idx + 1, i); }
-  }
-  return null;
-}
-// The receiver expression immediately preceding `end` (the index of the '.' before `should`): an identifier /
-// member chain, with balanced call/index groups consumed backward. Returns '' if none.
-function receiverBefore(body, end) {
-  let i = end - 1;
-  while (i >= 0 && /\s/.test(body[i])) i--;
-  const stop = i + 1;
-  for (; i >= 0; ) {
-    const c = body[i];
-    if (c === ')' || c === ']') { const open = c === ')' ? '(' : '['; let d = 0;
-      for (; i >= 0; i--) { const b = body[i]; if (b === c) d++; else if (b === open && --d === 0) break; }
-      i--; continue; }
-    if (/[A-Za-z0-9_$.]/.test(c)) { i--; continue; }
-    break;
-  }
-  return body.slice(i + 1, stop).trim();
-}
-// Number of top-level (comma-separated, bracket-depth-0) arguments in a parenthesized arg-list's inner text.
-function topLevelArgCount(s) {
-  let depth = 0, n = s.trim() ? 1 : 0;
-  for (let i = 0; i < s.length; i++) { const c = s[i];
-    if (c === '(' || c === '[' || c === '{') depth++;
-    else if (c === ')' || c === ']' || c === '}') depth--;
-    else if (c === ',' && depth === 0) n++; }
-  return n;
-}
 // Escape-aware quoted-string scan starting at the position of the OPENING quote character itself
 // (code[qPos] is one of ' " `). A backslash always escapes the NEXT character — it can never terminate
 // or (for a template literal) open interpolation — matching JS string-literal grammar. This replaces a
@@ -1028,157 +561,6 @@ export function residualAmbiguous(blocks, bareAmbiguous, runner) {
   return residual;
 }
 
-// ---- assertion-strength gate: which consumed fns have their RESULT pinned by a value matcher ----
-// jest/vitest value-pinning matchers that FAIL against the gross-break sentinel (so probing is sound).
-// Mirrors the vocabulary of checker/kinds/weakOracleGuard.mjs `PIN` (NOT .not./toBeDefined/toBeTruthy).
-const VALUE_PIN = /^\s*\.\s*(?:toBe|toEqual|toStrictEqual|toBeCloseTo|toBeNull|toBeNaN|toBeInstanceOf|toContain|toContainEqual|toMatch|toMatchObject|toHaveLength|toThrow|toThrowError)\b/;
-const VALUE_PIN_CALL = /^\s*\.\s*(?:toBe|toEqual|toStrictEqual|toBeCloseTo|toBeInstanceOf|toContain|toContainEqual|toMatch|toMatchObject|toHaveLength)\s*\(/;
-// chai mirror is NOT 1:1 with PIN: .to.match (string-coerces the target) and the bare .to.have.a/an
-// (type-checks) both PASS against the numeric sentinel, so they're excluded — sound forms only.
-// toHaveProperty/.have.property are excluded too: a primitive autoboxes, so the path resolves on its
-// prototype and PASSES the sentinel; .keys/.ownProperty require OWN properties, so they stay sound.
-// language chains: chai's fluent no-ops (be/been/is/that/which/and/has/deep/same/an/a) may sit between
-// `to`/`should` and the terminal matcher (`.to.be.equal(5)`, `.to.be.deep.equal(5)`) — they assert nothing
-// themselves, so allowing any run of them before the terminal group changes no soundness property; `have`
-// is deliberately NOT in this list (only `has` is), so `.to.have.property(...)` still never reaches the
-// terminal group and the have-subform exclusion (property autoboxes) stays intact.
-const CHAI_PIN = /^\s*\.\s*(?:to|should)\s*\.\s*(?:(?:be|been|is|that|which|and|has|deep|same|an|a)\s*\.\s*)*(?:(?:deep\s*\.\s*)?(?:equal|eql|include|contain)\b|have\s*\.\s*(?:deep\s*\.\s*)?(?:lengthOf|length|members|keys|string|ownProperty)\b)/;
-// standalone chai `should` sound-form matcher, tested from the '.' immediately before `should`.
-const SHOULD_SOUND = /^\.\s*should\s*\.\s*(?:(?:be|been|is|that|which|and|has|deep|same|an|a)\s*\.\s*)*(?:(?:deep\s*\.\s*)?(?:equal|eql|include|contain)\b|have\s*\.\s*(?:deep\s*\.\s*)?(?:lengthOf|length|members|keys|string|ownProperty)\b)/;
-// Module specifiers that resolve to node's `assert` — a local name bound to one of these (aliased default
-// import/require, or a destructured named import) is recognized as an assert call even under a non-literal
-// name. A name bound to any OTHER module (lodash, …) is never treated as assert — no false HOLLOW.
-const ASSERT_SPECS = new Set(['assert', 'node:assert', 'assert/strict', 'node:assert/strict']);
-const ASSERT_METHODS = /^(?:equal|strictEqual|deepEqual|deepStrictEqual)$/;
-// JVM value-pinning matcher vocabulary (Task 6): JUnit/kotlin.test equality asserters and AssertJ's
-// fluent form. Scanned only when `lang` is 'kotlin'/'java' — every JS/py caller (no lang arg, or a non-
-// JVM lang) never reaches this and stays byte-identical to pre-JVM behavior.
-const JVM_VALUE_ASSERT_RE = /\b(?:assertEquals|assertSame|assertArrayEquals|assertContentEquals)\s*\(/g;
-// AssertJ: assertThat(<actual>) is a pin only when followed by a SOUND (value-comparing) fluent
-// matcher — a bare assertThat(x) with only a weak follow-on (.isNotNull(), .isNotEmpty(), …) is not a
-// pin (mirrors the JS weak-matcher exclusion below: no assertion strength ⇒ never probed).
-const ASSERTJ_SOUND = /^\s*\.\s*(?:isEqualTo|isSameAs|containsExactly|containsExactlyInAnyOrder|isEqualToComparingFieldByField)\s*\(/;
-// AssertJ directional (relational) matchers — same asymmetry as RELATIONAL_PIN_CALL/CHAI_REL above: a
-// relational pin can PROVE but never CONVICT (see the verdict fold).
-const ASSERTJ_REL = /^\s*\.\s*(?:isGreaterThanOrEqualTo|isGreaterThan|isLessThanOrEqualTo|isLessThan)\s*\(/;
-// Relational (direction-only) matcher vocabulary — spec Feature 2 §1. A relational pin can PROVE
-// (mutant red) but can never CONVICT (survive → relation-unbound, never hollow) — see the verdict
-// fold. That asymmetry is what makes loose admission safe: a false-relational match can only add
-// proven/one-sided/relation-unbound, never an accusation.
-const RELATIONAL_PIN_CALL = /^\s*\.\s*(?:toBeGreaterThanOrEqual|toBeGreaterThan|toBeLessThanOrEqual|toBeLessThan)\s*\(/;
-// chai chains: same language-chain shape as CHAI_PIN, plus `at` (needed for .to.be.at.least/.at.most —
-// `at` is a chai no-op chain that the value vocabulary never needed).
-const CHAI_REL = /^\s*\.\s*(?:to|should)\s*\.\s*(?:(?:be|been|is|that|which|and|has|deep|same|an|a|at)\s*\.\s*)*(?:above|gt|greaterThan|least|gte|below|lt|lessThan|most|lte)\s*\(/;
-const SHOULD_REL = /^\.\s*should\s*\.\s*(?:(?:be|been|is|that|which|and|has|deep|same|an|a|at)\s*\.\s*)*(?:above|gt|greaterThan|least|gte|below|lt|lessThan|most|lte)\s*\(/;
-export function pinnedFragmentsByKind(body, imports = new Map(), lang) {
-  const jvm = lang === 'kotlin' || lang === 'java';
-  body = codeOnly(body, jvm ? lang : 'typescript'); // mask strings/comments FIRST — a code sample embedded in a string
-  // (or a commented-out assertion) must never be seen by the scans below (no false HOLLOW). Idempotent on
-  // already-masked input, so re-masking here is harmless when eligibleFns has already masked its copy.
-  const value = []; const relational = [];
-  const frags = value; // existing scan code below keeps pushing to `frags` unchanged
-  for (const m of body.matchAll(/expect\s*\(/g)) {
-    const { arg, end } = balancedFrom(body, m.index + m[0].length - 1);
-    let after = body.slice(end);
-    // jest/vitest .resolves/.rejects prefix: strip it and test VALUE_PIN only (chai has no .resolves,
-    // so CHAI_PIN after this prefix could only ever match accidental text). The gross-break mutant makes
-    // the async SUT resolve to (or throw/reject with) the numeric sentinel, so a sound matcher after the
-    // prefix provably fails against it — same soundness discipline as the sync path.
-    const pm = /^\s*\.\s*(?:resolves|rejects)\b/.exec(after);
-    if (pm) after = after.slice(pm[0].length);
-    if (pm ? VALUE_PIN.test(after) : (VALUE_PIN.test(after) || CHAI_PIN.test(after))) {
-      frags.push(arg);
-      const mm = VALUE_PIN_CALL.exec(after);
-      if (mm) frags.push(balancedFrom(after, mm.index + mm[0].length - 1).arg);
-    } else if (RELATIONAL_PIN_CALL.test(after) || (!pm && CHAI_REL.test(after))) {
-      relational.push(arg);
-      const rm = RELATIONAL_PIN_CALL.exec(after) || CHAI_REL.exec(after);
-      relational.push(balancedFrom(after, rm[0].length - 1).arg); // matcher arg — the other side of the relation
-    }
-  }
-  for (const m of body.matchAll(/\bassert(?:\.(?:strictEqual|deepStrictEqual|deepEqual|equal|ok))?\s*\(/g)) {
-    const { arg } = balancedFrom(body, m.index + m[0].length - 1);
-    if (/\bassert\s*\($/.test(m[0]) || /\.\s*ok\s*\($/.test(m[0])) {
-      const sides = topLevelComparisonSides(arg);
-      if (sides) { relational.push(sides[0]); relational.push(sides[1]); }
-      continue; // plain truthiness (no top-level comparator) stays excluded, exactly as before
-    }
-    frags.push(arg);
-  }
-  // aliased/destructured assert (import-aware): names bound to node:assert.
-  const bound = new Set(); for (const [name, spec] of imports) if (ASSERT_SPECS.has(spec)) bound.add(name);
-  for (const n of bound) {
-    const e = reEsc(n);
-    for (const m of body.matchAll(new RegExp('\\b' + e + '\\s*\\.\\s*(?:strictEqual|deepStrictEqual|deepEqual|equal)\\s*\\(', 'g')))
-      frags.push(balancedFrom(body, m.index + m[0].length - 1).arg);
-    if (ASSERT_METHODS.test(n))
-      for (const m of body.matchAll(new RegExp('(?<![.\\w$])' + e + '\\s*\\(', 'g')))
-        frags.push(balancedFrom(body, m.index + m[0].length - 1).arg);
-  }
-  // Hybrid fallback: X.<assertMethod>(a, b) where X is an UNDETECTABLE alias (not in imports at all).
-  // Guards: exact assert method names + EXACTLY 2 top-level args (distinguishes assert.equal(actual,expected)
-  // from chai `.to.equal(expected)` / a library `.equal(other)`, both 1-arg). A name bound to a non-assert
-  // module is excluded (it was in imports, so it's skipped here and not in `bound`).
-  for (const m of body.matchAll(/(?<![.\w$])([A-Za-z_$]\w*)\s*\.\s*(?:strictEqual|deepStrictEqual|deepEqual|equal)\s*\(/g)) {
-    const name = m[1];
-    if (name === 'assert' || imports.has(name)) continue; // literal handled above; any imported name handled above/excluded
-    const { arg } = balancedFrom(body, m.index + m[0].length - 1);
-    if (topLevelArgCount(arg) === 2) frags.push(arg);
-  }
-  // standalone chai `should` chains: <receiver>.should.<sound-form> — push the receiver (SUT extracted by eligibleFns)
-  for (const m of body.matchAll(/\.\s*should\s*\./g)) {
-    if (!SHOULD_SOUND.test(body.slice(m.index))) continue;
-    const recv = receiverBefore(body, m.index);
-    if (recv) frags.push(recv);
-  }
-  // chai `should` relational chain: <receiver>.should.be.<relational-form> — mirrors SHOULD_SOUND above.
-  for (const m of body.matchAll(/\.\s*should\s*\./g)) {
-    if (!SHOULD_REL.test(body.slice(m.index))) continue;
-    if (SHOULD_SOUND.test(body.slice(m.index))) continue; // value already claimed it
-    const recv = receiverBefore(body, m.index);
-    if (recv) relational.push(recv);
-  }
-  for (const m of body.matchAll(/\bassert\s+(.+?)\s*===?\s*(.+?)(?:$|\n)/gm)) { frags.push(m[1]); frags.push(m[2]); } // pytest / chai assert a == b
-  // pytest bare relational assert (spec §1): both sides pushed, chained comparisons allowed —
-  // asymmetric verdicting protects every relation, so a chain needs no special casing.
-  for (const m of body.matchAll(/\bassert\s+([^\n]+?)\s+(?:>=|<=|>|<)\s+([^\n]+?)(?:$|\n)/gm)) { relational.push(m[1]); relational.push(m[2]); }
-  if (jvm) {
-    // assertEquals(expected, actual) / assertSame / assertArrayEquals / assertContentEquals — JUnit puts
-    // the SUT call in EITHER position (expected first is the JUnit convention, but a caller can and does
-    // pass it either way), so the WHOLE arg list is pushed as one fragment rather than picking a side;
-    // eligibleFns only credits a candidate whose name actually appears in it, so this is over-inclusive
-    // but never wrong (the `\bname\s*\(` check below still requires the fn to be CALLED here).
-    for (const m of body.matchAll(JVM_VALUE_ASSERT_RE)) frags.push(balancedFrom(body, m.index + m[0].length - 1).arg);
-    // AssertJ assertThat(actual).isEqualTo(expected) — push the actual only when a sound fluent matcher
-    // follows; assertThat(x).isNotNull() (weak) pushes nothing, so a fn reachable only through it is
-    // never credited as eligible (see ASSERTJ_SOUND above).
-    for (const m of body.matchAll(/\bassertThat\s*\(/g)) {
-      const { arg, end } = balancedFrom(body, m.index + m[0].length - 1);
-      if (ASSERTJ_SOUND.test(body.slice(end))) frags.push(arg);
-    }
-    // Relational JVM forms (spec §1): assertTrue/assertFalse over one top-level comparison — paren and
-    // Kotlin trailing-lambda call shapes — and AssertJ's directional matchers. Both relation sides pushed.
-    for (const m of body.matchAll(/\bassert(?:True|False)\s*\(/g)) {
-      const sides = topLevelComparisonSides(balancedFrom(body, m.index + m[0].length - 1).arg);
-      if (sides) { relational.push(sides[0]); relational.push(sides[1]); }
-    }
-    if (lang === 'kotlin') for (const m of body.matchAll(/\bassert(?:True|False)\s*\{/g)) {
-      const inner = braceArgFrom(body, m.index + m[0].length - 1);
-      const sides = inner === null ? null : topLevelComparisonSides(inner);
-      if (sides) { relational.push(sides[0]); relational.push(sides[1]); }
-    }
-    for (const m of body.matchAll(/\bassertThat\s*\(/g)) {
-      const { arg, end } = balancedFrom(body, m.index + m[0].length - 1);
-      const rm = ASSERTJ_REL.exec(body.slice(end));
-      if (rm) { relational.push(arg); relational.push(balancedFrom(body.slice(end), rm[0].length - 1).arg); }
-    }
-  }
-  return { value, relational };
-}
-export function pinnedFragments(body, imports = new Map(), lang) {
-  const k = pinnedFragmentsByKind(body, imports, lang);
-  return [...k.value, ...k.relational];
-}
 // Callee names whose '(' is at bracket-depth 0 (not nested inside another call's args / an array / object).
 export function topLevelCallees(expr) {
   const out = []; let depth = 0;
@@ -1253,30 +635,6 @@ export function kotlinReceiverCall(expr, imports) {
   if (!m) return null;
   if (!imports.has(m[1])) return null; // receiver must be imported (object/type), not a local/mock/unimported type
   return m[2];
-}
-// Split `text` at its single top-level comparison operator (>, <, >=, <=) → [lhs, rhs], else null.
-// Depth-0 only (parens/brackets/braces balanced); refuses && and || (a joined condition is not one
-// relation — fail-closed per spec), ==/===/!= (never relational), a second comparator, arrows
-// (=>, ->), and shifts (<< >>). Runs on MASKED text, so string contents never reach it. Generic-type
-// false positives (f<T>(x)) are accepted: admission is verdict-safe by construction (see above).
-export function topLevelComparisonSides(text) {
-  let depth = 0, cmp = -1, op = '';
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '(' || c === '[' || c === '{') depth++;
-    else if (c === ')' || c === ']' || c === '}') depth--;
-    else if (depth === 0) {
-      if ((c === '&' && text[i + 1] === '&') || (c === '|' && text[i + 1] === '|')) return null;
-      if ((c === '=' && text[i + 1] === '=') || (c === '!' && text[i + 1] === '=')) return null;
-      if (c === '<' || c === '>') {
-        if (text[i - 1] === '=' || text[i - 1] === '-') continue; // => and -> arrows
-        if (text[i + 1] === c) { i++; continue; }                  // << >> shifts
-        if (cmp !== -1) return null;                               // a second comparator — refuse
-        cmp = i; op = text[i + 1] === '=' ? c + '=' : c;
-      }
-    }
-  }
-  return cmp === -1 ? null : [text.slice(0, cmp).trim(), text.slice(cmp + op.length).trim()];
 }
 // Back-compat single-value form — every reach/eligibility consumer that only needs the linked names.
 export function eligibleFns(body, candidateFns, imports = new Map(), lang) {
@@ -1429,26 +787,11 @@ export function importMap(code, lang) {
   }
   return m;
 }
-const isRelative = (spec) => /^\.\.?\//.test(spec);
-// `lang` is OPTIONAL: absent (every pre-JVM caller — makeResolver, resolvePySut) returns exactly the
-// original JS/py regex, byte-identical. Passing 'kotlin'/'java' switches to a JVM-declaration pattern
-// instead (resolveJvmSut below) — the two families never mix, so there is no shared-regex risk of a
-// JVM decl accidentally matching the JS branch or vice versa.
-function declRe(fn, lang) {
-  const e = reEsc(fn);
-  if (lang === 'kotlin') {
-    // `fun NAME(` — top-level, member, generic (`fun <T> NAME(`), and receiver/extension (`fun Recv.NAME(`)
-    // forms all converge on the same `fun ... NAME(` shape; a bare call site (`NAME(`, no `fun`) never
-    // matches. `class|object|interface NAME` covers a type itself being the "declaration" of its name.
-    return new RegExp(`\\bfun\\s+(?:<[^>]*>\\s*)?(?:[A-Za-z_][\\w.]*\\.)?${e}\\s*\\(|\\b(?:class|object|interface)\\s+${e}\\b`);
-  }
-  if (lang === 'java') {
-    // A method DECLARATION is `NAME(params) [throws ...] {` — the trailing `{` is what a call site
-    // (`NAME(args)`, followed by `;` or `)` or another token, never `{`) can never produce.
-    return new RegExp(`\\b${e}\\s*\\([^)]*\\)\\s*(?:throws[^{;]*)?\\{|\\b(?:class|interface|enum)\\s+${e}\\b`);
-  }
-  return new RegExp(`\\bexport\\s+(?:async\\s+)?function\\s+${e}\\b|\\b(?:export\\s+)?(?:const|let|var|function|class)\\s+${e}\\b|\\bfunction\\s*\\*\\s*${e}\\b|\\bdef\\s+${e}\\b|\\b${e}\\s*[:=]\\s*(?:async\\s*)?(?:function\\b|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)`);
-}
+// `(\/|$)`: a BARE `.` or `..` (no trailing slash) is a relative import of the directory itself —
+// radash's `import * as _ from '..'` — resolved by resolveRelative's `/index.*` candidates. The old
+// slash-required form silently dropped those specs into the alias branch, which refused them
+// (found by the 2026-07-29 corpus run: radash's entire suite sat behind exactly this).
+const isRelative = (spec) => /^\.\.?(\/|$)/.test(spec);
 // Exported so hasProductionContact (wrongLayerShadow's JS contact probe) can be unit-tested directly with
 // a hand-built resolver, mirroring resolveJvmSut/resolvePySut's own direct-testing convention — no
 // behavior change for prove()'s own internal call site.
@@ -1457,345 +800,148 @@ export function makeResolver(srcFiles, dir) {
   return (fn, testAbs, imports) => {
     const key = `${testAbs}::${fn}`;
     if (cache.has(key)) return cache.get(key);
-    let res = null;
     const spec = imports.get(fn);
-    // Import-aware: bind ONLY when the test imports fn from a RELATIVE file. Builtins (node:*) and bare deps
-    // (lodash, …) and un-imported globals never bind → the block is left unprobed, never a false HOLLOW.
-    if (spec && isRelative(spec)) {
-      const re = declRe(fn);
-      const target = resolveRelative(testAbs, spec); // absolute candidate path(s), as canonKeys
-      for (const f of srcFiles) {
-        if (!target.has(canonKey(f))) continue;
-        try { if (re.test(readFileSync(f, 'utf8'))) { res = toPosix(relative(dir, f)); break; } } catch {}
-      }
-    }
+    const res = spec ? resolveSpecMember(spec, fn, testAbs, srcFiles, dir) : null;
     cache.set(key, res); return res;
   };
+}
+// The ONE spec→declaring-file semantics, shared by makeResolver (a test's direct import of `fn`) and
+// jsNamespaceSuts (`NS.fn()` on a `* as NS` binding — the module export IS the same resolution
+// question). Binds when the specifier is a RELATIVE file or matches a DECLARATIVE path alias
+// (package.json `#` imports, tsconfig/jsconfig paths); builtins (node:*), bare deps (lodash, …)
+// matching no alias rule, and un-imported globals never bind → the block is left unprobed, never a
+// false HOLLOW. In both branches a direct declaration wins and only a fully-unresolved file considers
+// the one-hop barrel follow.
+function resolveSpecMember(spec, fn, testAbs, srcFiles, dir) {
+  let res = null;
+  if (isRelative(spec)) {
+    const re = declRe(fn);
+    const base = resolve(dirname(testAbs), spec);
+    for (const target of [extCandidateKeys(base), tsSwapKeys(base)]) {
+      if (!target) continue;
+      let sawFile = false;
+      for (const f of srcFiles) {
+        if (!target.has(canonKey(f))) continue;
+        sawFile = true;
+        try { if (re.test(readFileSync(f, 'utf8'))) { res = toPosix(relative(dir, f)); break; } } catch {}
+      }
+      if (!res) {
+        for (const f of srcFiles) {
+          if (!target.has(canonKey(f))) continue;
+          res = followReexportOnce(f, fn, srcFiles, dir);
+          if (res) break;
+        }
+      }
+      // A literal candidate FILE existing ends the search whether or not it resolved — the swap only
+      // fires where the literal set matched nothing at all.
+      if (res || sawFile) break;
+    }
+  } else {
+    // Alias fallback (mutation/alias.mjs): ordered candidate bases, consumed with tsc's
+    // first-existing-target semantics — the first base with a file ON DISK ends the search whether
+    // or not the declaration is found there, because that is the file the runtime loads (falling
+    // through to a later target would gut a file the test never runs: a false-verdict vector).
+    // On-disk existence is deliberately broader than srcFiles membership — a target that exists
+    // but is not a probeable source (a test-classified file, say) consumes the resolution and
+    // refuses, fail-closed.
+    const aliases = loadAliasesCached(dir);
+    const bases = aliases.length ? aliasBases(spec, aliases) : null;
+    if (bases) {
+      const re = declRe(fn);
+      const isFile = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
+      for (const b of bases) {
+        // Existence honors the ts-swap too: a `.js`-specified alias target whose only source is `.ts`
+        // still counts as this target existing (literal candidates checked first, same precedence).
+        let swapPaths = null;
+        for (const [ext, alts] of TS_SWAP) if (b.endsWith(ext)) { swapPaths = alts.map((a) => b.slice(0, -ext.length) + a); break; }
+        const literalExists = EXT_CANDIDATES.some((e) => isFile(b + e));
+        if (!literalExists && !(swapPaths && swapPaths.some(isFile))) continue;
+        const target = literalExists ? extCandidateKeys(b) : tsSwapKeys(b);
+        const matches = srcFiles.filter((f) => target.has(canonKey(f)));
+        for (const f of matches) {
+          try { if (re.test(readFileSync(f, 'utf8'))) { res = toPosix(relative(dir, f)); break; } } catch {}
+        }
+        if (!res) for (const f of matches) { res = followReexportOnce(f, fn, srcFiles, dir); if (res) break; }
+        break;
+      }
+    }
+  }
+  return res;
 }
 // Resolve a relative import specifier to the set of absolute source paths it could mean (ext + index
 // forms), as canonKeys — so a case/8.3-short-name/symlink difference between the specifier's resolved
 // form and the actual on-disk srcFiles entry (win32) still matches (replaces the old realpathSafe).
+const EXT_CANDIDATES = ['', '.mjs', '.cjs', '.js', '.jsx', '.ts', '.tsx', '/index.mjs', '/index.js', '/index.ts'];
+const extCandidateKeys = (absBase) => new Set(EXT_CANDIDATES.map((e) => canonKey(absBase + e)));
 function resolveRelative(testAbs, spec) {
-  const base = resolve(dirname(testAbs), spec);
-  const exts = ['', '.mjs', '.cjs', '.js', '.jsx', '.ts', '.tsx', '/index.mjs', '/index.js', '/index.ts'];
-  return new Set(exts.map((e) => canonKey(base + e)));
+  return extCandidateKeys(resolve(dirname(testAbs), spec));
 }
-
-// ---- Python precision path (stdlib `ast`, zero new dependency) ----
-// Run mutation/py_blocks.py over a test file → { imports:[{local,module,level}], blocks:[{name,line,
-// endline,calls,pins}] }, or null when python3/python is absent or the helper fails (→ regex fallback).
-// `pins` are the SUT calls whose RESULT is value-pinned by an equality matcher (assertEqual family /
-// `assert ==`) — including unittest's `self.assertEqual(...)`, which the JS-oriented pinnedFragments misses.
-export function pyBlocks(absTestFile) {
-  const exe = pythonExe();
-  if (!exe) return null;
-  try {
-    const out = execFileSync(exe, [PY_HELPER, absTestFile], { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
-    const parsed = JSON.parse(out);
-    if (!parsed || !Array.isArray(parsed.blocks) || !Array.isArray(parsed.imports)) return null;
-    return parsed;
-  } catch { return null; }
-}
-// Shared binding + module-file resolution for BOTH resolvePySut and resolvePyClassMember (T4, §6.3 — "one
-// helper, two callers, no drift"): given a name bound via `from MODULE import NAME` in pyImports, resolve
-// which of srcFiles it could mean. A relative import (`level`>0) climbs parents from the test file's dir;
-// an absolute import resolves against the test file's dir (pytest prepends the test's rootdir to sys.path
-// under the flat layout). Returns the matching srcFiles entries (module.py or module/__init__.py — at most
-// one of those normally exists, but both candidates are checked so a case/symlink collision still
-// matches), or null when the name isn't imported at all. Callers apply their own downstream ambiguity
-// discipline over the returned list.
-function resolvePyModuleFiles(name, pyImports, absTest, srcFiles) {
-  const binding = pyImports.find((b) => b.local === name);
-  if (!binding) return null;
-  let base = dirname(absTest);
-  for (let i = 1; i < (binding.level || 0); i++) base = dirname(base);
-  const segs = binding.module ? binding.module.split('.') : [];
-  const modBase = segs.length ? resolve(base, ...segs) : base;
-  const cands = new Set([modBase + '.py', join(modBase, '__init__.py')].map(canonKey));
-  return srcFiles.filter((f) => cands.has(canonKey(f)));
-}
-// Bind a pinned call name to its SUT .py file IMPORT-AWARE: only through a `from MODULE import fn` the test
-// actually wrote (py_blocks emits those bindings) — a name the test did not import never binds, so no false
-// HOLLOW. The resolved file must also DECLARE `def fn`. Returns the SUT path relative to dir, or null (→
-// skip the block).
-export function resolvePySut(fn, pyImports, absTest, srcFiles, dir) {
-  const files = resolvePyModuleFiles(fn, pyImports, absTest, srcFiles);
-  if (!files) return null;
-  const re = declRe(fn);
-  // Ambiguity guard, mirroring the JVM overload rule: a module that binds NAME via BOTH a `class NAME`
-  // declaration and a def/assign-style declaration (`def NAME(` / `NAME = ...`) rebinds the module-level
-  // name at import time — whichever comes LAST textually wins at runtime. Gut-time's jsSigRegex
-  // (probe.mjs) has no `class NAME` alternative, so it always guts the def/assign form regardless of
-  // which one the runtime actually binds. When the class is what runs, the def/assign mutant is dead
-  // code — the mutant survives a sound test → false HOLLOW. Refuse rather than guess.
-  const e = reEsc(fn);
-  const classRe = new RegExp(`\\bclass\\s+${e}\\b`);
-  const defAssignRe = new RegExp(`\\bdef\\s+${e}\\b|\\b${e}\\s*[:=]\\s*(?:async\\s*)?(?:function\\b|\\([^)]*\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)`);
-  for (const f of files) {
-    try {
-      const text = readFileSync(f, 'utf8');
-      if (classRe.test(text) && defAssignRe.test(text)) return null;
-      if (re.test(text)) return toPosix(relative(dir, f));
-    } catch {}
+// TS NodeNext idiom: specifiers say `.js` while the sources are `.ts` (`export * from './struct.js'`
+// next to struct.ts — found on superstruct, where it hid a whole barrel from the hop). Returns the
+// SWAPPED candidate set for a base whose extension has a TS source form, or null. Callers run the
+// literal set first and consult this only when the literal candidates matched NOTHING — so a real
+// on-disk .js (a repo genuinely shipping .js sources, or a built file beside its source) wins exactly
+// as before and the swap can never redirect a resolution away from an existing literal match.
+const TS_SWAP = [['.js', ['.ts', '.tsx']], ['.jsx', ['.tsx']], ['.mjs', ['.mts']], ['.cjs', ['.cts']]];
+function tsSwapKeys(absBase) {
+  for (const [ext, alts] of TS_SWAP) {
+    if (absBase.endsWith(ext)) {
+      const stem = absBase.slice(0, -ext.length);
+      return new Set(alts.map((a) => canonKey(stem + a)));
+    }
   }
   return null;
 }
 
-// resolvePyClassMember(ctor, method, pyImports, absTest, srcFiles, dir) → sutRel | null (T4, §6.3). The
-// Python instance-receiver counterpart of resolvePySut: shares resolvePyModuleFiles' binding + module-file
-// resolution (one helper, two callers — no drift), then hands each candidate file to the py_blocks.py
-// `--member` ast validator (§6.2: exactly one module-top-level `ClassDef ctor` with no decorator/metaclass,
-// no other module-level binding of `ctor`, exactly one non-async undecorated `FunctionDef method` directly
-// in `ctor`'s own body with first param literally `self`, no other `def method` anywhere in the module),
-// then requires `pyDeclSiteCount(srcText, method) === 1` — gut-time regex parity (§6.4, mirrors jsDeclSites/
-// jvmDeclSites), so a credited site is exactly the one grossBreak's Python pass 1 would actually gut. A
-// python3-less environment (pythonExe() null) refuses every candidate (pyMemberOk returns false) — the
-// pyAst caller in prove()'s block loop never even reaches here in that case (pyBlocks() itself already
-// returns null with no interpreter, so `pyAst` is null and the whole T4 path is skipped — this is a second,
-// independent fail-closed layer, not the only one).
-const pyMemberCache = new Map();
-function pyMemberOk(absSrc, ctor, method) {
-  const key = absSrc + '::' + ctor + '::' + method;
-  if (pyMemberCache.has(key)) return pyMemberCache.get(key);
-  let ok = false;
-  const exe = pythonExe();
-  if (exe) {
-    try {
-      const out = execFileSync(exe, [PY_HELPER, '--member', absSrc, ctor, method], { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
-      ok = JSON.parse(out).ok === true;
-    } catch { ok = false; }
+// One-hop re-export barrel follow: the imported file carries no DECLARATION of `fn`, but forwards it —
+// `export { fn } from './impl.mjs'` (same-name only) or `export * from './impl.mjs'`. The runtime import
+// reaches the declaration through exactly that hop, so gutting the resolved file genuinely breaks the
+// test; anything less certain REFUSES (null → the block keeps its truthful `sut-unresolved` label):
+//   - an ALIASED re-export (`sum as fn`) — the declared name differs from the tested name, so a gut
+//     aimed at `fn` in the target could never break the function the test actually runs;
+//   - a bare/builtin specifier — deps are never SUTs (same moat as the direct path);
+//   - a chain deeper than one hop — the named target that is itself only a barrel resolves nothing,
+//     and it never falls back to stars (an explicit name outranks a star in ESM, so a star hit there
+//     would contradict what the runtime resolves);
+//   - `export *` fan-outs where more than one target file declares `fn` — ambiguous, never first-wins.
+// Raw-text scan, same convention as importMap/declRe — codeOnly would blank the specifier strings this
+// needs. `export * as ns from` never matches the star pattern (it exports `ns`, not `fn`), and
+// `export type { … }` never matches the named pattern (the `type` keyword breaks `export\s*{`).
+function followReexportOnce(barrelAbs, fn, srcFiles, dir) {
+  let text; try { text = readFileSync(barrelAbs, 'utf8'); } catch { return null; }
+  const declaringTargets = (specs) => {
+    const hits = new Set();
+    const re = declRe(fn);
+    for (const s of specs) {
+      if (!isRelative(s)) continue;
+      const base = resolve(dirname(barrelAbs), s);
+      for (const target of [extCandidateKeys(base), tsSwapKeys(base)]) {
+        if (!target) continue;
+        let sawFile = false;
+        for (const f of srcFiles) {
+          if (!target.has(canonKey(f))) continue;
+          sawFile = true;
+          try { if (re.test(readFileSync(f, 'utf8'))) hits.add(f); } catch {}
+        }
+        if (sawFile) break; // literal file existed — the swap never overrides it (see tsSwapKeys)
+      }
+    }
+    return [...hits];
+  };
+  const named = [];
+  for (const m of text.matchAll(/\bexport\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g)) {
+    for (const part of m[1].split(',')) {
+      const bits = part.trim().split(/\s+as\s+/).map((b) => b.trim());
+      if (bits[0] === fn && bits[bits.length - 1] === fn) { named.push(m[2]); break; }
+    }
   }
-  pyMemberCache.set(key, ok);
-  return ok;
-}
-export function resolvePyClassMember(ctor, method, pyImports, absTest, srcFiles, dir) {
-  const files = resolvePyModuleFiles(ctor, pyImports, absTest, srcFiles);
-  if (!files) return null;
-  for (const f of files) {
-    if (!pyMemberOk(f, ctor, method)) continue;
-    let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
-    if (pyDeclSiteCount(text, method) !== 1) continue;
-    return toPosix(relative(dir, f));
+  if (named.length) {
+    const hits = declaringTargets(named);
+    return hits.length === 1 ? toPosix(relative(dir, hits[0])) : null;
   }
-  return null;
-}
-
-// ---- JVM SUT resolution (Task 7): package/import-gated, fail-closed on ambiguity ----
-// JVM has no relative-path imports (the JS/py resolvers' whole mechanism), so a callee binds by PACKAGE
-// REACHABILITY instead: the set of packages the test file could plausibly mean a bare name from — its own
-// `package` plus every `import`ed package. The SAME-PACKAGE case is the common one (a JVM test typically
-// shares its SUT's package and imports nothing for it, only JUnit/AssertJ), which is why testPackage must
-// be seeded into the reachable set — omitting it would leave the ordinary case unresolved.
-function jvmPackageOf(code) {
-  const m = /^\s*package\s+([\w.]+)/m.exec(code);
-  return m ? m[1] : '';
-}
-// An import's PACKAGE, by kind (all reduce to a uniform pop rule):
-//   - ordinary `import a.b.C` (class) / `import a.b.foo` (top-level fn) → drop the LAST segment → `a.b`.
-//   - ordinary wildcard `import a.b.*` → the `[\w.]+` capture greedily eats the trailing '.' (the optional
-//     `\.\s*\*` group is left with nothing to consume), so it captures `a.b.`; split→['a','b',''], one
-//     pop drops the '' → `a.b`.
-//   - Java STATIC `import static a.b.C.member` → the member lives in class C in package a.b, so drop the
-//     last TWO segments (member + class) → `a.b`. Static wildcard `import static a.b.C.*` captures `a.b.C.`
-//     (same trailing-'.' greed); two pops drop the '' then C → `a.b`.
-// The `(static\s+)?` group is REQUIRED for two reasons: (1) without it the regex matches at the keyword
-// `static` and captures the literal "static" → pops to '' → the DEFAULT package poisons the reachable set,
-// so a default-package src/main file wrongly resolves (a false HOLLOW — `import static …Assertions.assert*`
-// is in nearly every real Java JUnit/AssertJ test); (2) it drives the second pop that gives statically-
-// imported SUTs their package. An import must NEVER inject '' into reachable (guarded by `if (p)`), so the
-// default package enters `reachable` ONLY from a genuinely empty `testPackage` seed, never from an import.
-function jvmReachablePackages(testCode) {
-  const pkgs = new Set([jvmPackageOf(testCode)]);
-  for (const im of testCode.matchAll(/^\s*import\s+(static\s+)?([\w.]+)(?:\s*\.\s*\*)?/gm)) {
-    const segs = im[2].split('.');
-    segs.pop();                 // drop class (ordinary) / member-or-wildcard-slot (static)
-    if (im[1]) segs.pop();      // static: also drop the class
-    const p = segs.join('.');
-    if (p) pkgs.add(p);         // an import must never inject the empty (default) package
-  }
-  return pkgs;
-}
-// fn -> the single src/main .kt/.java file that DECLARES it EXACTLY ONCE, or null. Fail-closed like
-// resolvePySut, but the ambiguity unit is a DECLARATION, not a file: 0 declarations → null (never probed —
-// safe, at worst a missed reach); >=2 declarations → null (ambiguous — guessing which declarer a mutant
-// needs to break risks a FALSE hollow, strictly worse than a miss). Crucially this rejects BOTH ≥2
-// declaring FILES **and** ≥2 OVERLOADS in one file: grossBreak guts only the FIRST matching declaration,
-// so an overloaded SUT whose test exercises a LATER overload would pass under the mutant → false hollow.
-// Counting declarations globally (not files) makes an overloaded SUT ungutable (a safe reach-loss). A
-// candidate file must clear BOTH gates: its own `package` is in the test's reachable set (bounds the
-// residual — an unimported package's same-named fn, e.g. a stdlib-collision `size`, must never resolve),
-// AND it `declRe(fn, fileLang)`-declares fn (the DECLARATION pattern — `fun NAME(` / `TYPE NAME(...) {` —
-// never a bare call site). `lang` (the TEST file's kotlin|java) is accepted for call-site parity with the
-// other resolvers but unused here: each CANDIDATE's own lang is derived from its own extension.
-export function resolveJvmSut(fn, testCode, absTest, srcFiles, dir, lang) {
-  const reachable = jvmReachablePackages(testCode);
-  let testKey; try { testKey = canonKey(absTest); } catch { testKey = absTest; }
-  let winner = null; let declCount = 0;
-  for (const f of srcFiles) {
-    const fileLang = f.endsWith('.kt') ? 'kotlin' : f.endsWith('.java') ? 'java' : null;
-    if (!fileLang) continue; // non-JVM entries in a mixed srcFiles list are simply skipped
-    if (canonKey(f) === testKey) continue; // defensive: never resolve to the test file itself
-    let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
-    if (!reachable.has(jvmPackageOf(text))) continue;
-    // Count DECLARATION occurrences (global) — the same decl-vs-call pattern declRe uses, so overloads in
-    // ONE file are counted individually; the `[^)]*` in the Java method pattern is bounded by the first
-    // ')', so two overloads can't be swallowed as one match. Summed across every reachable file.
-    const re = new RegExp(declRe(fn, fileLang).source, 'g');
-    const n = (text.match(re) || []).length;
-    if (n > 0) { winner = f; declCount += n; }
-  }
-  if (declCount !== 1) return null; // 0 → unreachable/undeclared; >=2 → ambiguous (≥2 files OR same-file overloads)
-  return toPosix(relative(dir, winner));
-}
-
-// ---- JVM INSTANCE-method SUT resolution: `analyzer.computeRt60(x)` on a lowercase-variable receiver ----
-// sutFnsIn (confirm.mjs) deliberately EXCLUDES a lowercase-receiver call — a name like `compute` off
-// `list.compute(` collides with too many things to gut blind. This resolves the SAME shape SAFELY by
-// inferring the RECEIVER's RUNTIME type and binding the method to ONLY that type's own declaration —
-// never a bare name.
-//
-// CRITICAL (virtual dispatch): an instance call dispatches to the receiver's RUNTIME type, which is the
-// type of the CONSTRUCTOR that produced the value — NOT its declared/annotated static type. For
-// `val a: Base = Derived()` a real `a.compute()` runs `Derived.compute`, so gutting `Base.compute` would
-// never execute → a sound test survives → a FALSE HOLLOW. Therefore inference resolves from the
-// CONSTRUCTOR CALL (`= ClassName(...)` / `= new ClassName(...)`), never the annotation. When the runtime
-// type is not a directly-visible constructor call — an annotation/declared type only, a factory or method
-// return (`= makeThing()`), a chained construction (`= Foo().let { … }`), a parameter/field with no
-// visible construction, or a reassignment to >1 distinct constructor type — the runtime type is genuinely
-// unknowable statically, so this REFUSES (a miss, never a guess). Resolving the constructor's type makes a
-// separate virtual-dispatch guard unnecessary: we always gut the very class the receiver actually is.
-
-// `this`/`it` are never real objects to resolve (Kotlin's implicit lambda receiver, or a plain keyword);
-// excluding them here means a bare `it.something()` inside a lambda never falls through to (fruitlessly,
-// but harmlessly) look for a `val it = …` declaration.
-const INSTANCE_RECEIVER_SKIP = new Set(['this', 'it']);
-
-// Lowercase-receiver instance-method calls inside an ALREADY-MASKED fragment (pinnedFragments masks its
-// own copy before slicing fragments, so a call mentioned only in a string/comment can never surface
-// here). Multiple pairs per fragment are all collected — JUnit's assertEquals pushes the WHOLE arg list
-// as one fragment, so both expected/actual sides are scanned uniformly (mirrors the existing bare-name
-// eligibility check, which is equally over-inclusive-but-safe on which side matched).
-function instanceCallsIn(fragText) {
-  const out = [];
-  for (const m of fragText.matchAll(/(?<![\w$.])([a-z]\w*)\s*\.\s*([A-Za-z_$]\w*)\s*\(/g)) {
-    const [, receiver, method] = m;
-    if (INSTANCE_RECEIVER_SKIP.has(receiver)) continue;
-    out.push({ receiver, method });
-  }
-  return out;
-}
-
-// Shared runtime-type inference: scan the FULL masked test file for EVERY assignment to RECEIVER and
-// return the single constructor (runtime) type common to all of them, or null (REFUSE). `assignRe` finds
-// each assignment site (a declaration — possibly type-annotated — or a bare reassignment); its match end
-// sits right after the `=`. `ctorAt(s, i)` returns `{ type, end }` when the masked text at `i` begins
-// with a DIRECT constructor call (the index just past its closing `)` is `end`), else null. Fail-closed
-// on every branch:
-//   - ANY assignment whose RHS is not a direct constructor (a factory/method return, another variable, a
-//     literal, or a declaration with no initializer) → null: the runtime type is unknowable.
-//   - a constructor immediately CHAINED (`Foo().let { … }`, `.also`, `.apply`, `.map`, …) → null: the
-//     chain may transform the value's type (we don't special-case which combinators preserve it).
-//   - >1 DISTINCT constructor type across the file (reassignment / shadowing) → null: ambiguous.
-//   - no assignment visible at all (a parameter, or a field constructed out of view) → null.
-function inferReceiverTypeFromCtor(masked, assignRe, ctorAt) {
-  const types = new Set();
-  let sawAssignment = false;
-  for (const m of masked.matchAll(assignRe)) {
-    sawAssignment = true;
-    const c = ctorAt(masked, m.index + m[0].length);
-    if (!c) return null; // RHS is not a direct constructor call — runtime type unknown → refuse
-    let k = c.end; while (k < masked.length && /\s/.test(masked[k])) k++;
-    if (masked[k] === '.') return null; // chained construction (`Foo().let{…}`) — type may be transformed → refuse
-    types.add(c.type);
-  }
-  if (!sawAssignment) return null; // annotation / parameter / field only, never constructed in view → refuse
-  if (types.size !== 1) return null; // reassignment / shadowing to >1 distinct constructor type → refuse
-  return [...types][0];
-}
-
-// Kotlin: an assignment site is `[val|var] RECEIVER [: Type] = …` (the optional `: Type` annotation is
-// consumed but IGNORED — resolution is from the RHS constructor, not the annotation) or a bare
-// `RECEIVER = …` reassignment. The leading `(?<![\w$.(])` rejects a member access (`x.a =`) and a named
-// argument (`foo(a = Widget())`). The RHS constructor is `[pkg.]ClassName(` with a Capitalized simple
-// name — a lowercase callee (`makeFoo()`, `listOf()`) is a factory, never a constructor, so it refuses.
-function inferKotlinReceiverType(maskedTestCode, receiver) {
-  const r = reEsc(receiver);
-  const assignRe = new RegExp(`(?<![\\w$.(])(?:(?:val|var)\\s+)?${r}\\s*(?::\\s*[\\w.<>?, ]+?)?\\s*=(?!=)`, 'g');
-  return inferReceiverTypeFromCtor(maskedTestCode, assignRe, kotlinCtorAt);
-}
-function kotlinCtorAt(s, i) {
-  while (i < s.length && /\s/.test(s[i])) i++;
-  const m = /^(?:[\w.]*\.)?([A-Z]\w*)\s*\(/.exec(s.slice(i));
-  if (!m) return null;
-  const { end } = balancedFrom(s, i + m[0].length - 1); // paren-balance from the ctor's '('
-  return { type: m[1], end };
-}
-
-// Java: an assignment site is `[Type] RECEIVER = …` (declared type consumed but IGNORED) or a bare
-// `RECEIVER = …` reassignment. The RHS constructor is `new [pkg.]ClassName(`. A declaration WITHOUT `new`
-// (`Foo a = makeFoo()` factory, or `Foo a;` with no initializer) yields no constructor RHS → refuse: a
-// factory's runtime type is unknowable, exactly like Kotlin. (Java has no named call arguments, so the
-// `(?<![\w$.(])` guard is only defensive there.)
-function inferJavaReceiverType(maskedTestCode, receiver) {
-  const r = reEsc(receiver);
-  const assignRe = new RegExp(`(?<![\\w$.(])(?:[A-Za-z_][\\w.<>?\\[\\], ]*\\s+)?${r}\\s*=(?!=)`, 'g');
-  return inferReceiverTypeFromCtor(maskedTestCode, assignRe, javaCtorAt);
-}
-function javaCtorAt(s, i) {
-  while (i < s.length && /\s/.test(s[i])) i++;
-  const m = /^new\s+(?:[\w.]*\.)?([A-Z]\w*)\s*\(/.exec(s.slice(i));
-  if (!m) return null;
-  const { end } = balancedFrom(s, i + m[0].length - 1);
-  // `new X(...) { … }` — an ANONYMOUS SUBCLASS: the runtime type is the anon class (which may override
-  // the method), not X, so gutting X's method could never be dispatched → refuse. (The chain-refuse in
-  // inferReceiverTypeFromCtor catches a trailing `.`; this catches a trailing `{`.)
-  let k = end; while (k < s.length && /\s/.test(s[k])) k++;
-  if (s[k] === '{') return null;
-  return { type: m[1], end };
-}
-
-// Kotlin allows a capitalized TOP-LEVEL FACTORY function with the SAME name as a class
-// (`fun Foo(): Bar = Bar()` alongside `class Foo`), so a bare `Foo()` callee is constructor-vs-factory
-// AMBIGUOUS: it may return a DIFFERENT runtime type than the `class Foo` constructor. kotlinCtorAt can't
-// tell them apart (identical call text), so once the callee resolved to `class Foo`, this asks whether
-// ANY reachable src file ALSO declares a same-named `fun Foo(` — if so, refuse (fail closed). Only fires
-// when such a same-named function actually exists (rare); Java is exempt (no bare-name factory functions).
-// Reachability-gated exactly like resolveJvmClass. The `fun` pattern here is declRe's Kotlin form (member,
-// generic, and receiver/extension shapes all reduce to `fun … NAME(`), never a call site.
-function hasReachableSameNameFun(name, testCode, srcFiles) {
-  const reachable = jvmReachablePackages(testCode);
-  const funRe = new RegExp(declRe(name, 'kotlin').source.split('|')[0]); // the `fun …NAME(` alternative only, not `class NAME`
-  for (const f of srcFiles) {
-    if (!f.endsWith('.kt')) continue; // only Kotlin has a bare `Foo()` factory-function shape
-    let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
-    if (!reachable.has(jvmPackageOf(text))) continue;
-    if (funRe.test(codeOnly(text, 'kotlin'))) return true;
-  }
-  return false;
-}
-
-// The single reachable src/main file that DECLARES `class ClassName` (Kotlin also accepts `object` —
-// interfaces are deliberately EXCLUDED: an interface member has no gut-able body of its own, and treating
-// an interface as "the" declarer of an overridable method is exactly the virtual-dispatch risk this whole
-// resolver exists to avoid). Package/import-gated exactly like resolveJvmSut, and fails closed on 0 or ≥2
-// reachable declaring files — never guesses between two same-named classes.
-function resolveJvmClass(className, testCode, absTest, srcFiles) {
-  const reachable = jvmReachablePackages(testCode);
-  let testKey; try { testKey = canonKey(absTest); } catch { testKey = absTest; }
-  const e = reEsc(className);
-  let winner = null; let count = 0;
-  for (const f of srcFiles) {
-    const fileLang = f.endsWith('.kt') ? 'kotlin' : f.endsWith('.java') ? 'java' : null;
-    if (!fileLang) continue;
-    if (canonKey(f) === testKey) continue;
-    let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
-    if (!reachable.has(jvmPackageOf(text))) continue;
-    const masked = codeOnly(text, fileLang);
-    const classRe = fileLang === 'kotlin' ? new RegExp(`\\b(?:class|object)\\s+${e}\\b`) : new RegExp(`\\bclass\\s+${e}\\b`);
-    if (classRe.test(masked)) { winner = f; count++; }
-  }
-  if (count !== 1) return null;
-  return winner;
+  const stars = [...text.matchAll(/\bexport\s*\*\s*from\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+  const hits = declaringTargets(stars);
+  return hits.length === 1 ? toPosix(relative(dir, hits[0])) : null;
 }
 
 // How many times `method` is DECLARED inside one specific file (reuses declRe's decl-vs-call pattern).
@@ -1812,340 +958,6 @@ function methodDeclCountInFile(fileAbs, method) {
   let text; try { text = readFileSync(fileAbs, 'utf8'); } catch { return 0; }
   const re = new RegExp(declRe(method, fileLang).source, 'g');
   return (codeOnly(text, fileLang).match(re) || []).length;
-}
-
-// ---- jvmOwnPlainInstanceMember: the containment + depth + member-kind + one-hop-supertype guard that
-// replaces the bare methodDeclCountInFile check in jvmInstanceSuts (docs/plans/2026-07-08-jvm-
-// inheritance-gap.md — the "JVM inheritance-root false-HOLLOW gap"). methodDeclCountInFile's file-wide,
-// containment-blind count is necessary but NOT sufficient: a count of 1 only proves the single site is
-// the unique GUT target file-wide — not that it is the resolved class's own dispatchable instance
-// member. When the real `decrypt` a receiver dispatches to is actually INHERITED from Base (another
-// file) while Service's own file happens to contain exactly one OTHER same-named declaration (a
-// sibling/nested class, a companion object, a top-level fun, a receiver'd extension, a java static, an
-// interface default, …), the old count credits that wrong declaration — gut-time guts it, the pinned
-// call still runs the untouched inherited method, and a SOUND test survives the mutant: a false HOLLOW.
-// This guard closes that gap: credit only when the single site is a PLAIN instance member declared
-// DIRECTLY inside the resolved class's own body, at body top level (depth 0), never receiver-prefixed
-// (a kotlin extension) or `static` (java) — plus a one-hop supertype same-name guard for the override
-// case (X1). Every check below is a REFUSAL path; any failure returns false, leaving the block exactly
-// as unprobed as `methodDeclCountInFile(...) !== 1` used to.
-// ----
-
-const KOTLIN_HEADER_BLACKLIST = new Set([
-  'fun', 'class', 'object', 'interface', 'val', 'var', 'typealias', 'import', 'package', 'return',
-  'companion', 'init', 'by',
-]);
-const JAVA_HEADER_BLACKLIST = new Set(['class', 'interface', 'enum', 'record']);
-
-// Header-skip → class body span (§4.3): a single forward scan from just after the class NAME token,
-// blind-skipping everything inside `<...>` (generics) and `(...)` (primary-ctor params, supertype ctor
-// args) depth, refusing on any depth-0 character that isn't whitespace/word/`:` (kotlin)/`,`/`.`/`@` — a
-// `by` at depth 0 (kotlin) refuses the WHOLE class outright (K17: a delegate expression may take a
-// trailing lambda, making the header's first depth-0 `{` indistinguishable from the real body — so the
-// span can never be safely located when `by` appears). Returns `{ open, close, supertypeNames }` (the
-// class body's brace span + every depth-0 CAPITALIZED token seen after the heritage clause starts —
-// kotlin: after the first depth-0 `:`; java: after `extends`, stopping at `implements`/`permits`) or null
-// (refuse: unparseable header, or no body at all — a bodyless Kotlin class with everything inherited).
-// Over-collecting a supertype name (a `where`-clause bound, a generic type param) is safe: names are
-// only ever used to REFUSE more (§4.6), never to credit.
-function jvmClassBodySpan(maskedSrc, headerStart, fileLang) {
-  const blacklist = fileLang === 'kotlin' ? KOTLIN_HEADER_BLACKLIST : JAVA_HEADER_BLACKLIST;
-  let angle = 0, paren = 0;
-  let sawColon = false;      // kotlin: seen a depth-0 ':' — the heritage clause has started
-  let afterExtends = false;  // java: between 'extends' and 'implements'/'permits'/the body brace
-  const supertypeNames = [];
-  let tokenStart = -1;
-
-  const flush = (endIdx) => {
-    if (tokenStart < 0) return true;
-    const tok = maskedSrc.slice(tokenStart, endIdx);
-    tokenStart = -1;
-    if (blacklist.has(tok)) return false; // ran off a bodyless header, or a fail-closed `by`
-    if (fileLang === 'kotlin') {
-      if (sawColon && /^[A-Z]/.test(tok)) supertypeNames.push(tok.split('.').pop());
-    } else {
-      if (tok === 'extends') afterExtends = true;
-      else if (tok === 'implements' || tok === 'permits') afterExtends = false;
-      else if (afterExtends && /^[A-Z]/.test(tok)) supertypeNames.push(tok.split('.').pop());
-    }
-    return true;
-  };
-
-  for (let i = headerStart; i < maskedSrc.length; i++) {
-    const c = maskedSrc[i];
-    if (angle > 0 || paren > 0) { // skip blind, but keep tracking nesting so we know when we're back at 0
-      if (c === '<') angle++;
-      else if (c === '>' && angle > 0) angle--;
-      else if (c === '(') paren++;
-      else if (c === ')' && paren > 0) paren--;
-      continue;
-    }
-    if (/[A-Za-z0-9_$]/.test(c)) { if (tokenStart < 0) tokenStart = i; continue; }
-    if (!flush(i)) return null;
-    if (/\s/.test(c)) continue;
-    if (c === '<') { angle++; continue; }
-    if (c === '(') { paren++; continue; }
-    if (c === ')') return null;              // a stray close paren at depth 0 — malformed header, refuse
-    if (c === ':' && fileLang === 'kotlin') { sawColon = true; continue; }
-    if (c === ',' || c === '.' || c === '@') continue;
-    if (c === '{') {
-      let depth = 0, k = i;
-      for (; k < maskedSrc.length; k++) { const cc = maskedSrc[k]; if (cc === '{') depth++; else if (cc === '}') { depth--; if (depth === 0) break; } }
-      if (depth !== 0) return null;           // unbalanced — refuse
-      return { open: i, close: k, supertypeNames };
-    }
-    return null;                              // any other depth-0 character — unparseable header, refuse
-  }
-  return null; // EOF before a body brace — bodyless class (everything inherited), refuse
-}
-
-// Modifier back-walk (§4.5): from `siteStart` (kotlin: the index of `fun`; java: the index of the
-// return-TYPE token — jvmDeclSites' `index`), walk word-tokens BACKWARDS, collecting language-modifier
-// keywords and annotations (a token immediately preceded by `@`) — stopping at the first token that is
-// neither, which bounds the walk WITHOUT needing a statement terminator (a Kotlin expression-bodied
-// member has no `;`, so a PREVIOUS member's trailing expression, e.g. `= x + 1`, must stop the walk at
-// `1`, never leaking THAT member's modifiers into this one's). `isStatic` is java-only (kotlin never
-// refuses on a modifier); `hasOverride` is the kotlin `override` keyword or java's `@Override` annotation
-// — consumed only by the one-hop supertype guard (§4.6).
-function jvmModifierBackWalk(maskedSrc, siteStart, fileLang) {
-  const modSet = fileLang === 'kotlin'
-    ? new Set(['public', 'protected', 'private', 'internal', 'open', 'final', 'override', 'abstract',
-      'sealed', 'suspend', 'inline', 'noinline', 'crossinline', 'operator', 'infix', 'tailrec',
-      'external', 'actual', 'expect'])
-    : new Set(['public', 'protected', 'private', 'static', 'final', 'abstract', 'synchronized', 'native',
-      'strictfp', 'default']);
-  let isStatic = false, hasOverride = false;
-  let i = siteStart;
-  for (;;) {
-    let j = i - 1;
-    while (j >= 0 && /\s/.test(maskedSrc[j])) j--;
-    if (j < 0) break;
-    let k = j;
-    while (k >= 0 && /\w/.test(maskedSrc[k])) k--;
-    const tokStart = k + 1;
-    if (tokStart > j) break; // hit a non-word character immediately — nothing more to collect
-    const tok = maskedSrc.slice(tokStart, j + 1);
-    if (tokStart > 0 && maskedSrc[tokStart - 1] === '@') { // an annotation — always continues the walk
-      if (fileLang === 'java' && tok === 'Override') hasOverride = true;
-      i = tokStart - 1;
-      continue;
-    }
-    if (modSet.has(tok)) {
-      if (fileLang === 'java' && tok === 'static') isStatic = true;
-      if (fileLang === 'kotlin' && tok === 'override') hasOverride = true;
-      i = tokStart;
-      continue;
-    }
-    break; // first non-modifier, non-annotation token — stop (never leak a PRIOR member's modifiers in)
-  }
-  return { isStatic, hasOverride };
-}
-
-// jvmOwnPlainInstanceMember(classFileAbs, className, method, testCode, absTest, srcFiles) → boolean.
-// §4.2–§4.7's closed invariant: credit `method` against the resolved class file only if its file-wide
-// site count is exactly 1, that single site is a plain instance member declared DIRECTLY in the class's
-// OWN body at top level, the class is a `class` (never a kotlin `object` — K9: `Service()` on an object
-// is invoke-operator sugar, so the runtime type is unknowable) declared exactly once in the file, the
-// header parses under the fail-closed skip rule, the file's masked text brace-balances, and — for the
-// override case — the one-hop supertype same-name guard (X1) clears. Any failing check → refuse.
-export function jvmOwnPlainInstanceMember(classFileAbs, className, method, testCode, absTest, srcFiles) {
-  const fileLang = classFileAbs.endsWith('.kt') ? 'kotlin' : classFileAbs.endsWith('.java') ? 'java' : null;
-  if (!fileLang) return false;
-  let text; try { text = readFileSync(classFileAbs, 'utf8'); } catch { return false; }
-  const maskedSrc = codeOnly(text, fileLang);
-
-  // §4.7 global brace-balance sanity — before any span work, so a leaked brace (a Kotlin string-template
-  // interpolation nesting a quote, an unlexed Java text block) can't desync the span/depth math below.
-  let bal = 0;
-  for (const c of maskedSrc) {
-    if (c === '{') bal++;
-    else if (c === '}') { bal--; if (bal < 0) return false; }
-  }
-  if (bal !== 0) return false;
-
-  // §4.2 class location — exactly one `class|object NAME` (kotlin) / `class NAME` (java) in the file; a
-  // resolved `object` (incl. `companion object NAME`) refuses outright (K9).
-  const e = reEsc(className);
-  const classRe = fileLang === 'kotlin' ? new RegExp(`\\b(class|object)\\s+${e}\\b`, 'g') : new RegExp(`\\b(class)\\s+${e}\\b`, 'g');
-  const classMatches = [...maskedSrc.matchAll(classRe)];
-  if (classMatches.length !== 1) return false;
-  const classMatch = classMatches[0];
-  if (fileLang === 'kotlin' && classMatch[1] === 'object') return false;
-
-  // §4.3 header-skip → body span
-  const span = jvmClassBodySpan(maskedSrc, classMatch.index + classMatch[0].length, fileLang);
-  if (!span) return false;
-  const { open, close, supertypeNames } = span;
-
-  // §4.4 site containment + depth — file-wide site count must be exactly 1 (subsumes the old overload
-  // rule: gut-time guts the FIRST body-site in the file, so a second site anywhere means gut-time may hit
-  // the wrong one), that site inside THIS class's own span, at body top level (depth 0).
-  const sites = jvmDeclSites(text, method, fileLang);
-  if (sites.length !== 1) return false;
-  const [site] = sites;
-  if (!(site.index > open && site.index < close)) return false;
-  let nestDepth = 0;
-  for (let k = open + 1; k < site.index; k++) { const c = maskedSrc[k]; if (c === '{') nestDepth++; else if (c === '}') nestDepth--; }
-  if (nestDepth !== 0) return false;
-
-  // §4.5 member-kind — a receiver-prefixed (kotlin extension) site is never THIS class's own dispatchable
-  // member; a java `static` site is refused (an instance receiver call could still legally hit a
-  // same-named STATIC, but whether an instance overload also exists in the hierarchy is unknowable).
-  if (site.receiverPrefixed) return false;
-  const { isStatic, hasOverride } = jvmModifierBackWalk(maskedSrc, site.index, fileLang);
-  if (fileLang === 'java' && isStatic) return false;
-
-  // §4.6 one-hop supertype same-name guard (X1) — a resolvable direct parent that ALSO declares `method`
-  // makes the override case dispatch-ambiguous unless this site is a marked override AND the parent
-  // declares it exactly once (dispatch-by-signature is otherwise unknowable even for an override).
-  // Unresolvable (library/interface) parents are status-quo residue — skipped, never refused.
-  for (const name of supertypeNames) {
-    const parentFileAbs = resolveJvmClass(name, testCode, absTest, srcFiles);
-    if (!parentFileAbs) continue;
-    const parentLang = parentFileAbs.endsWith('.kt') ? 'kotlin' : parentFileAbs.endsWith('.java') ? 'java' : null;
-    if (!parentLang) continue;
-    let parentText; try { parentText = readFileSync(parentFileAbs, 'utf8'); } catch { continue; }
-    const parentSiteCount = jvmDeclSites(parentText, method, parentLang).length;
-    if (parentSiteCount === 0) continue;
-    if (parentSiteCount >= 2) return false;
-    if (!hasOverride) return false;
-  }
-  return true;
-}
-
-// jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang) → sutRel | null.
-// The SHARED tail of the JVM type->method credit chain — extracted verbatim from jvmInstanceSuts's
-// variable-path loop body (T3) so the INLINE path (Kotlin `X(...).m(...)`, Java `new X(...).m(...)`) can
-// never diverge from it: both callers resolve `type` however they see fit (variable: inferKotlinReceiverType
-// / inferJavaReceiverType from a constructor-assignment, reused unchanged; inline: read directly off the
-// ctor at the call site) and then hand it, with the called `method` name, to this ONE function. Every
-// branch below is a REFUSAL (returns null) — the only success return is the resolved SUT's path relative
-// to `dir`. The Kotlin capitalized-factory-vs-class guard (hasReachableSameNameFun) lives HERE, not in
-// either caller, so the inline path can never skip it — the exact hazard T3 exists to close.
-function jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang) {
-  const classFileAbs = resolveJvmClass(type, testCode, absTest, srcFiles);
-  if (!classFileAbs) return null; // unreachable / undeclared / declared in ≥2 reachable files
-  // Kotlin capitalized-factory-vs-class collision: if a same-named `fun <type>(` is reachable, the
-  // `type()` callee is constructor-vs-factory ambiguous (may return a different runtime type) → refuse.
-  if (lang === 'kotlin' && hasReachableSameNameFun(type, testCode, srcFiles)) return null;
-  // The method must be a PLAIN INSTANCE member declared DIRECTLY in the RUNTIME class's OWN body: an
-  // INHERITED method (declared only in a superclass) is refused — we can only safely gut a body the
-  // constructed class itself declares or overrides. jvmOwnPlainInstanceMember (docs/plans/2026-07-08-
-  // jvm-inheritance-gap.md) also subsumes the old file-wide overload guard AND closes the inheritance-
-  // root gap a bare declaration COUNT left open (a same-named sibling/nested/companion/extension/static
-  // declaration elsewhere in the file could satisfy a count of 1 while being the WRONG gut target).
-  if (!jvmOwnPlainInstanceMember(classFileAbs, type, method, testCode, absTest, srcFiles)) return null;
-  return toPosix(relative(dir, classFileAbs));
-}
-
-// jvmInstanceSuts(body, testCode, absTest, srcFiles, dir, lang) → [{fn, sutRel, rel?}], one entry per
-// pinned lowercase-receiver instance call this block makes that could be resolved SAFELY end-to-end.
-// `body` is THIS block's own source (scopes the pinned-call scan to calls this specific test actually
-// makes); `testCode` is the WHOLE test file (scopes the receiver's type inference across block-local
-// construction AND class-field/@BeforeEach setup). Runs only for lang 'kotlin'/'java' — every other
-// caller (JS/py/no-lang) gets `[]` and this function is otherwise never reached (see prove()'s block
-// loop), so JS/TS/Python behavior stays byte-identical. Purely ADDITIVE: the caller merges this with the
-// existing bare-name eligible list, deduped by (fn, sutRel) — it never removes anything sutFnsIn/
-// resolveJvmSut already found.
-// Per-kind crediting (relational-assert reach): value fragments are scanned FIRST, relational SECOND, so
-// a (method, sutRel) pair reachable through both kinds is credited as a VALUE entry (the `seen` dedupe
-// keeps whichever kind got there first) — a relational credit can prove but never convict, so letting a
-// value credit win is the safe direction. `rel` is omitted (not `false`) on a value entry, so every
-// pre-existing (value-only) caller's `{fn, sutRel}` shape stays byte-identical.
-export function jvmInstanceSuts(body, testCode, absTest, srcFiles, dir, lang) {
-  if (lang !== 'kotlin' && lang !== 'java') return [];
-  const maskedTestCode = codeOnly(testCode, lang);
-  const byKind = pinnedFragmentsByKind(body, undefined, lang); // masks its own copy of `body`
-  const out = []; const seen = new Set();
-  const credit = (method, sutRel, rel) => {
-    const key = method + '::' + sutRel;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(rel ? { fn: method, sutRel, rel: true } : { fn: method, sutRel });
-  };
-  for (const [frags, rel] of [[byKind.value, false], [byKind.relational, true]]) {
-    for (const frag of frags) {
-      for (const { receiver, method } of instanceCallsIn(frag)) {
-        const type = lang === 'kotlin' ? inferKotlinReceiverType(maskedTestCode, receiver) : inferJavaReceiverType(maskedTestCode, receiver);
-        if (!type) continue; // runtime type not a directly-visible constructor (annotation/factory/chain/ambiguous) — skip
-        const sutRel = jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang);
-        if (!sutRel) continue;
-        credit(method, sutRel, rel);
-      }
-      // INLINE receiver (T3): Kotlin `X(...).m(...)` / Java `new X(...).m(...)` directly in this same
-      // pinned fragment — no assignment, no variable. Routed through the IDENTICAL shared credit chain
-      // above (jvmCreditTypeMethod) — a wrong-target inline credit is exactly as much a false verdict as a
-      // wrong-target variable credit, so it gets exactly the same guards, never fewer. Frags only (no hop
-      // infra on JVM — documented asymmetry with JS, not a correctness issue: pinnedFragments already
-      // masks/scopes the pinned assertion text, and JVM has no bare-var-hop discipline to mirror).
-      for (const { type, method } of jvmInlineCtorMethodCallsIn(frag, lang)) {
-        const sutRel = jvmCreditTypeMethod(type, method, testCode, absTest, srcFiles, dir, lang);
-        if (!sutRel) continue;
-        credit(method, sutRel, rel);
-      }
-    }
-  }
-  return out;
-}
-
-// jvmInlineCtorMethodCallsIn(frag, lang) — INLINE constructor-receiver'd instance calls in an
-// already-masked pinned fragment: Kotlin `X(...).m(...)`, Java `new X(...).m(...)`. Returns
-// [{ type, method }] pairs (never resolves anything — resolution/credit is jvmCreditTypeMethod's job,
-// identical to the variable path).
-//
-// The ctor parse REUSES kotlinCtorAt/javaCtorAt unchanged, at a boundary-checked simple-name scan
-// position (`(?<![\w$.])`): for Kotlin this sits right on the capitalized class-name character itself;
-// for Java it sits on the `new` keyword (javaCtorAt then re-parses `new\s+NAME(` from there, exactly as
-// the variable path's ctorAt calls do). A dotted/qualified name (`pkg.X()`, `new ns.X()`) is therefore
-// never even found: Kotlin's boundary fails immediately (the name character is preceded by `.`), and
-// Java's scan regex requires the character right after `new`+whitespace to be `[A-Z]` — a lowercase
-// package segment there (`new ns.X(`) fails outright — same documented under-reach as jsCtorAt on the JS
-// path. Kotlin additionally refuses when the previous non-whitespace character is `:` — the heritage /
-// object-expression position (`class Foo : X() {}`, `(object : X() {}) `) where `X(...)` is a supertype
-// constructor delegation, not an inline receiver construction (belt-and-suspenders: the next-non-ws-must-
-// be-`.` check below already refuses every realistic occurrence of this shape too, since a heritage/
-// object-expression `X(...)` is always immediately followed by a class/object body `{`).
-//
-// Two boundary checks (identical discipline to jsInlineCtorMethodCallsIn) make this closed and
-// fail-closed:
-//   - the first non-whitespace character after the ctor's balanced `)` must be EXACTLY `.` — excludes a
-//     bare ctor with no method call, Kotlin's trailing-lambda `X() { }.m()` and `object : X() {…}.m()`
-//     (both leave `{` there), and Java's anonymous-subclass `new X(){ … }.m()` (already independently
-//     refused inside javaCtorAt's own trailing-`{` check — this is belt-and-suspenders for Java).
-//   - the first non-whitespace character after the METHOD call's own balanced `)` must be NONE of
-//     `. ? ! {` — excludes a chained `X().m().n()` (refuses `m`; `n`'s receiver is `m`'s return, never
-//     reached — this scanner only pairs a method with an IMMEDIATELY preceding ctor), a builder chain
-//     `X().build().m()`, Kotlin's `X()!!.m()`, and (defensively) a trailing `{`.
-//
-// A ctor not immediately followed by `.NAME(` (a bare ctor argument, a property/field access, a method
-// reference with no call parens) is simply never emitted — "no credit" per §5.1, not a refusal path.
-function jvmInlineCtorMethodCallsIn(frag, lang) {
-  const out = [];
-  const scanRe = lang === 'java' ? /(?<![\w$.])new\s+[A-Z]/g : /(?<![\w$.])[A-Z]\w*\s*\(/g;
-  for (const m of frag.matchAll(scanRe)) {
-    if (lang === 'kotlin') {
-      let p = m.index - 1;
-      while (p >= 0 && /\s/.test(frag[p])) p--;
-      if (frag[p] === ':') continue; // heritage / object-expression position
-    }
-    const c = lang === 'java' ? javaCtorAt(frag, m.index) : kotlinCtorAt(frag, m.index);
-    if (!c) continue;
-    let i = c.end;
-    while (i < frag.length && /\s/.test(frag[i])) i++;
-    if (frag[i] !== '.') continue; // not immediately followed by a member access
-    i++;
-    while (i < frag.length && /\s/.test(frag[i])) i++;
-    const mm = /^([A-Za-z_$][\w$]*)\s*\(/.exec(frag.slice(i));
-    if (!mm) continue; // property/field access, or a method reference with no call parens
-    const methodParenOpen = i + mm[0].length - 1;
-    const { end: methodEnd } = balancedFrom(frag, methodParenOpen);
-    let j = methodEnd;
-    while (j < frag.length && /\s/.test(frag[j])) j++;
-    const nc = frag[j];
-    if (nc === '.' || nc === '?' || nc === '!' || nc === '{') continue; // chained/optional/non-null refusal
-    out.push({ type: c.type, method: mm[1] });
-  }
-  return out;
 }
 
 // ---- JS/TS INSTANCE-method SUT resolution (Task B1 / T3): `service.decrypt(service.encrypt(x))` on a
@@ -2348,29 +1160,7 @@ export function jsInstanceSuts(body, testCode, absTest, srcFiles, imports, dir) 
   };
   for (const [frags, rel] of [[byKind.value, false], [byKind.relational, true]]) {
     if (!frags.length) continue;
-
-    // one variable hop, mirroring eligibleFns' own bare-var hop: a pinned bare var assigned (same-line,
-    // single-assignment only) from an instance-call RHS. bareVars is the set of identifiers appearing
-    // anywhere in a pinned fragment (over-inclusive-but-safe, same discipline as eligibleFns).
-    const bareVars = new Set();
-    for (const f of frags) for (const v of f.matchAll(/(?<![.\w$])([A-Za-z_$]\w*)\b/g)) bareVars.add(v[1]);
-    const texts = [...frags];
-    // Arrow-aware annotation-skip group — same fix, same reasoning, as eligibleFns' const/let/var hop.
-    for (const m of masked.matchAll(/(?:const|let|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
-      if (!bareVars.has(m[1])) continue;
-      // reassigned pinned var (fixture 15): >1 assignment to this name anywhere in the masked block body
-      // means the pinned value may not be THIS declaration's RHS result at all — refuse the hop outright,
-      // stricter than the existing bare-name hop (never retrofit that shipped behavior this cycle).
-      // The count regex carries the SAME arrow-aware annotation-skip group between the name and `=`: without
-      // it, an ANNOTATED declaration's own `=` never matched (the `: Type` sits in between), so an annotated
-      // `let c: Calc = new Calc()` reassigned once elsewhere read asnCount 1 instead of 2 — the declaration's
-      // own assignment silently uncounted — and this guard failed to fire on a genuinely ambiguous pin.
-      const asnCount = (masked.match(new RegExp(`(?<![\\w$.])${reEsc(m[1])}(?:\\s*:\\s*(?:=>|[^=\\n])+?)?\\s*=(?![=>])`, 'g')) || []).length;
-      if (asnCount > 1) continue;
-      texts.push(m[2]);
-    }
-
-    for (const text of texts) {
+    for (const text of pinnedScanTexts(masked, frags)) {
       if (hasTopLevelShortCircuit(text)) continue; // dead-branch refusal (fixture 8), every scan text
       for (const { receiver, method } of instanceCallsIn(text)) {
         if (paramNames.has(receiver)) continue; // (a) receiver shadowed by a callback param (fixture 9)
@@ -2399,6 +1189,111 @@ export function jsInstanceSuts(body, testCode, absTest, srcFiles, imports, dir) 
       for (const { type, method } of jsInlineCtorMethodCallsIn(text)) {
         const sutRel = jsCreditTypeMethod(type, method, maskedTestCode, absTest, srcFiles, imports, dir);
         if (!sutRel) continue;
+        credit(method, sutRel, rel);
+      }
+    }
+  }
+  return out;
+}
+
+// The scan texts a pinned block yields for receiver'd-call crediting: the pinned fragments themselves,
+// plus one variable hop mirroring eligibleFns' own bare-var hop — a pinned bare var assigned (same-line,
+// single-assignment only) from a call RHS. bareVars is the set of identifiers appearing anywhere in a
+// pinned fragment (over-inclusive-but-safe, same discipline as eligibleFns). Shared by jsInstanceSuts
+// and jsNamespaceSuts — extracted verbatim from the former's kind loop, byte-identical behavior.
+// The reassigned-pinned-var refusal (fixture 15): >1 assignment to a name anywhere in the masked block
+// body means the pinned value may not be THIS declaration's RHS result at all — refuse the hop outright.
+// Both regexes carry the arrow-aware annotation-skip group between the name and `=`: without it, an
+// ANNOTATED declaration's own `=` never matched (the `: Type` sits in between), so an annotated
+// `let c: Calc = new Calc()` reassigned once elsewhere read asnCount 1 instead of 2 — the declaration's
+// own assignment silently uncounted — and the ambiguity guard failed to fire.
+function pinnedScanTexts(masked, frags) {
+  const bareVars = new Set();
+  for (const f of frags) for (const v of f.matchAll(/(?<![.\w$])([A-Za-z_$]\w*)\b/g)) bareVars.add(v[1]);
+  const texts = [...frags];
+  for (const m of masked.matchAll(/(?:const|let|var)\s+([A-Za-z_$]\w*)(?:\s*:\s*(?:=>|[^=\n])+?)?[^\S\n]*=(?!>)[^\S\n]*([^\n;]+)/g)) {
+    if (!bareVars.has(m[1])) continue;
+    const asnCount = (masked.match(new RegExp(`(?<![\\w$.])${reEsc(m[1])}(?:\\s*:\\s*(?:=>|[^=\\n])+?)?\\s*=(?![=>])`, 'g')) || []).length;
+    if (asnCount > 1) continue;
+    texts.push(m[2]);
+  }
+  return texts;
+}
+
+// ---- JS/TS NAMESPACE-member SUT resolution: `_.sort(...)` on an `import * as _ from '..'` binding ----
+// The runtime receiver of `NS.fn()` under a namespace import IS the module namespace object, so `NS.fn`
+// is exactly the target module's export `fn` — the same resolution question makeResolver answers for a
+// direct import, routed through the same resolveSpecMember core (relative or declarative-alias spec,
+// direct declaration first, then one barrel hop — `import * as _ from '..'` over an `export * from`
+// index composes to the declaring file). Wild receipt: radash's suite (258 pin-unresolved blocks) is
+// exactly this shape.
+// ONLY `import * as NS` binds — a DEFAULT import's members are properties of one exported value, not
+// module exports, and a same-named top-level declaration in that file could be code the test never
+// runs: gutting it would mint a false verdict. Every guard below is a REFUSAL path, mirroring
+// jsInstanceSuts at the same coarseness:
+//   - file-wide mock-framework taint (a module factory can replace the whole namespace);
+//   - NS appearing as ANY callback/function parameter in the file (a fragment-level `_.sort()` could
+//     bind the lambda's `_`, not the module — scope analysis is out of budget, refuse file-wide);
+//   - NS locally re-declared (`const NS = …`, `function NS…`) anywhere in the file;
+//   - NS monkey-patched (`NS.fn = …`) or Object.assign/defineProperty'd (frozen at ESM runtime, but a
+//     CJS-interop namespace is not — refuse rather than reason about interop);
+//   - a specifier that is neither relative nor a declarative alias, or a member with no unique
+//     declaration through the core — resolveSpecMember refuses there.
+export function jsNamespaceSuts(body, testCode, absTest, srcFiles, imports, dir) {
+  const nsBindings = new Map(); // name -> { spec, cjs }
+  for (const m of testCode.matchAll(/\bimport\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"]/g)) nsBindings.set(m[1], { spec: m[2], cjs: false });
+  // CJS namespace form (`const R = require('..')`, the ramda shape): require() returns module.exports,
+  // so `R.fn` is the target's export `fn` — plain-identifier LHS only; destructured requires stay on the
+  // existing bare-name path. An ESM binding of the same name wins (a double binding is nonsense code —
+  // the assignment-count guard below refuses it anyway).
+  for (const m of testCode.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+    if (!nsBindings.has(m[1])) nsBindings.set(m[1], { spec: m[2], cjs: true });
+  }
+  if (!nsBindings.size) return [];
+  const maskedTestCode = codeOnly(testCode, 'typescript');
+  if (MOCK_TAINT.test(maskedTestCode)) return [];
+  const paramNames = jsParamNames(maskedTestCode);
+  const masked = codeOnly(body, 'typescript');
+  const byKind = pinnedFragmentsByKind(masked, imports);
+  const out = []; const seen = new Set();
+  const credit = (method, sutRel, rel) => {
+    const key = method + '::' + sutRel;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(rel ? { fn: method, sutRel, rel: true } : { fn: method, sutRel });
+  };
+  for (const [frags, rel] of [[byKind.value, false], [byKind.relational, true]]) {
+    if (!frags.length) continue;
+    for (const text of pinnedScanTexts(masked, frags)) {
+      if (hasTopLevelShortCircuit(text)) continue;
+      for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g)) {
+        const [, ns, method] = m;
+        const binding = nsBindings.get(ns);
+        if (!binding) continue;
+        if (paramNames.has(ns)) continue;
+        const nsE = reEsc(ns);
+        if (binding.cjs) {
+          // The CJS binding IS a `const NS = …`, so the ESM any-local-declaration refusal would kill
+          // every credit. Instead: NS must be assigned exactly ONCE file-wide (the require itself) and
+          // never be a function/class declaration — a rebound receiver could be anything.
+          const asn = (maskedTestCode.match(new RegExp(`(?<![\\w$.])${nsE}\\s*=(?![=>])`, 'g')) || []).length;
+          if (asn !== 1) continue;
+          if (new RegExp(`\\b(?:function|class)\\s+${nsE}\\b`).test(maskedTestCode)) continue;
+        } else if (new RegExp(`\\b(?:const|let|var|function|class)\\s+${nsE}\\b`).test(maskedTestCode)) continue;
+        if (new RegExp(`\\b${nsE}\\s*\\.\\s*[A-Za-z_$][\\w$]*\\s*=(?![=>])`).test(maskedTestCode)) continue;
+        if (new RegExp(`\\bObject\\s*\\.\\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\\s*\\(\\s*${nsE}\\b`).test(maskedTestCode)) continue;
+        const sutRel = resolveSpecMember(binding.spec, method, absTest, srcFiles, dir);
+        if (!sutRel) continue;
+        // CJS-only target guard: a module.exports REASSIGNED to a non-object-literal
+        // (`module.exports = SomeClass` / `= require(…)`) makes members properties of that one value —
+        // a same-named top-level declaration could be code the test never runs. An object-literal
+        // reassignment keeps members tied to their declarations and passes.
+        if (binding.cjs) {
+          try {
+            const sutMasked = codeOnly(readFileSync(join(dir, sutRel), 'utf8'), 'typescript');
+            if (/\bmodule\s*\.\s*exports\s*=(?!\s*\{)/.test(sutMasked)) continue;
+          } catch { continue; }
+        }
         credit(method, sutRel, rel);
       }
     }
@@ -2606,7 +1501,8 @@ export function prove(dir, opts = {}) {
   // UP-TO-DATE relative to some OTHER, older content this run built earlier (an old-Gradle interleaving:
   // gut fn A, gut fn B, gut fn A again with a DIFFERENT sentinel than the first time — rare, but possible
   // under --deep's opposite-mutant interleaving) must still fail closed, never ride on a stale match to
-  // the wrong content. See survivorEvidenceValid (above parseGradleResults) for the read/write contract.
+  // the wrong content. See survivorEvidenceValid — defined earlier in this file (parseGradleResults itself
+  // lives in mutation/jvm.mjs, re-exported near the top) — for the read/write contract.
   const lastCompiled = new Map();
   // true denominators for the --deep identity-stub advisory — per-fn, not per-test: stubbed = passthrough
   // probes attempted for fn, passed = the stub survived (also lands in `weak`). An audit found most
@@ -3034,6 +1930,11 @@ export function prove(dir, opts = {}) {
           for (const inst of jsInstanceSuts(b.body, code, absTest, srcFiles, imports, dir)) {
             if (!eligible.some((x) => x.fn === inst.fn && x.sutRel === inst.sutRel)) eligible.push(inst);
           }
+          // Namespace-member reach (`_.sort()` on `import * as _`): same additive merge, same dedupe —
+          // and same L === 'js' gate, for the same regex-fallback-Python reason as above.
+          for (const inst of jsNamespaceSuts(b.body, code, absTest, srcFiles, imports, dir)) {
+            if (!eligible.some((x) => x.fn === inst.fn && x.sutRel === inst.sutRel)) eligible.push(inst);
+          }
         }
         // Python instance-method reach (T4, §6.3): a receiver'd call — inline `Calc().add(2,3)` or
         // variable `c = Calc(); c.add(2,3)` — that resolvePySut's bare-name pins path never resolves at
@@ -3281,294 +2182,6 @@ export function prove(dir, opts = {}) {
   const grossSurvivorsList = [...survivorTally.values()].filter((e) => e.survivedIn.length > 0 && e.caughtIn === 0 && !hollowFns.has(e.fn));
 
   return { runner, scored, caught, hollow, weak, oneSided, oneSidedBlocks, ...(proven.length ? { proven } : {}), ...(opts.deep ? { weakSummary } : {}), inconclusive, skipped, outOfScope, probes, capped, envAborted, pct: scored ? Math.round((caught / scored) * 100) : null, changedFileCount, changes, changeSummary, ...(grossSurvivorsList.length ? { grossSurvivors: grossSurvivorsList } : {}), ...(scopeWarning ? { scopeWarning } : {}) };
-}
-
-// Plain-English translation of a skip/inconclusive why-code, for the unverifiable section only — a
-// reader should never have to know what "sut-unresolved" means. A baseline/did-not-run/flaky/
-// ambiguous-title inconclusive reason (free text, not a fixed code) reads as one generic readable
-// phrase; anything truly unrecognized falls back to the raw reason verbatim rather than hiding it.
-const UNVERIFIABLE_REASON_MSG = {
-  'no-pin': 'only checks a mock / no value pinned',
-  'one-sided': 'the binding test detects only one direction of error',
-  'pin-unresolved': "pins a value the probe can't tie to a called function",
-  'relation-unbound': "relational oracle — the mutant survived both extremes; the relation doesn't pin a value",
-  'sut-unresolved': "can't locate the function from the test's imports",
-  'dynamic-title': 'test name is computed at runtime',
-  'ungutable': "no compiling wrong-value sentinel for this function (return type or body form)",
-  'instrumented-test': 'needs a device/emulator',
-  'unsupported-source-set': 'unsupported Gradle source set',
-  'probe-cap': 'not probed — probe cap or time budget reached (raise --max-probes/--time-budget)',
-  'env-abort': 'not probed — the run aborted after the first baselines all failed (likely wrong runner or broken build/environment)',
-};
-function readableUnverifiableReason(reason) {
-  if (Object.prototype.hasOwnProperty.call(UNVERIFIABLE_REASON_MSG, reason)) return UNVERIFIABLE_REASON_MSG[reason];
-  if (/^baseline |^did-not-run |^flaky baseline|^ambiguous title/.test(reason || '')) return 'the referencing test is inconclusive';
-  if (/^runner-mismatch/.test(reason || '')) return "the detected runner can't run this test's language";
-  return reason;
-}
-
-// r.hollow entries NOT already carried by a changed-function hollow row — the whole-scope findings every
-// human diff surface must render (the exit code counts them; see formatDiffReport's comment). Shared by
-// formatDiffReport here and formatMarkdown (mutation/gutcheck.mjs) so the two surfaces can never drift.
-export function extraHollowOf(r) {
-  const changeHollowBlocks = new Set((r.changes || []).filter((c) => c.status === 'hollow' && c.evidence && c.evidence.blocks)
-    .flatMap((c) => c.evidence.blocks.map((b) => `${b.file}:${b.line}`)));
-  return (r.hollow || []).filter((h) => !changeHollowBlocks.has(`${h.file}:${h.line}`));
-}
-
-// Boundary-blind-spot aggregate — a fold over r.oneSided rows, formatter-only (result shape, JSON,
-// SARIF, exit codes untouched). Groups by the direction the test BINDS: posRed=true → red under the
-// positive sentinel → binds only against too-high results; posRed=false → too-low. 'inline' = one
-// header line (diff + markdown surfaces); 'breakdown' = header + per-direction file counts
-// (full-scan surface, where volume lives). A single row always collapses to the singular inline form.
-export function oneSidedLines(rows, style) {
-  const n = rows.length;
-  if (!n) return [];
-  const hi = rows.filter((o) => o.posRed), lo = rows.filter((o) => !o.posRed);
-  if (n === 1) return [`boundary blind spots: 1 one-sided test — binds only against ${hi.length ? 'too-high' : 'too-low'} results; never a blocker:`];
-  const head = (txt) => `boundary blind spots: ${n} one-sided test(s) — ${txt}; never a blocker:`;
-  if (style === 'breakdown') {
-    const lines = [head('these bind one direction of error only')];
-    for (const [group, label] of [[hi, 'too-high'], [lo, 'too-low']]) {
-      if (!group.length) continue;
-      const perFile = new Map();
-      for (const o of group) perFile.set(o.file, (perFile.get(o.file) || 0) + 1);
-      const files = [...perFile.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
-      lines.push(`  bind only against ${label} results (${group.length}): ${files.map(([f, c]) => `${f} (${c})`).join(', ')}`);
-    }
-    return lines;
-  }
-  if (!hi.length || !lo.length) return [head(`all bind only against ${hi.length ? 'too-high' : 'too-low'} results`)];
-  return [head(`${hi.length} bind${hi.length === 1 ? 's' : ''} only against too-high results, ${lo.length} only against too-low`)];
-}
-
-// Full-suite human report (no diff scope — r.changeSummary is null). Pinned byte-for-byte by the
-// gutcheck-cli.test.mjs "byte-identical to the release format" test and mutation/gutcheck.mjs's own
-// banner()-then-formatReport() call: this function must never reference r.changeSummary/r.changes.
-function formatFullScanReport(r) {
-  const lines = [];
-  const scope = r.outOfScope ? ` (${r.outOfScope} test blocks outside the diff)` : '';
-  if (r.scored === 0 && (r.probes > 0 || (r.inconclusive || []).length > 0)) lines.push(`gutcheck: no verdicts — ${r.probes} test(s) probed, all inconclusive (${r.inconclusive.length} inconclusive, ${r.skipped.length} skipped). Runner: ${r.runner}.`);
-  else if (r.scored === 0) lines.push(`gutcheck: no value-pinning tests to probe${scope} (${r.skipped.length} skipped, ${r.inconclusive.length} inconclusive). Runner: ${r.runner}.`);
-  else {
-    // Denominator-first headline: when tests were skipped or inconclusive, the
-    // one line that gets quoted must carry the coverage fraction — "verdicts on X of Y tests" — so it can
-    // never read as a whole-suite claim. A clean run (nothing skipped, nothing inconclusive) keeps the
-    // single-clause release format byte-for-byte: there the scored count IS the denominator.
-    const total = r.scored + (r.skipped || []).length + (r.inconclusive || []).length;
-    if (total > r.scored) lines.push(`gutcheck: verdicts on ${r.scored} of ${total} tests (${Math.round((r.scored / total) * 100)}%) — ${r.caught}/${r.scored} (${r.pct}%) fail when the function they test is broken.${scope}  [${r.probes} probes, runner: ${r.runner}]`);
-    else lines.push(`gutcheck: ${r.caught}/${r.scored} tests (${r.pct}%) fail when the function they test is broken.${scope}  [${r.probes} probes, runner: ${r.runner}]`);
-  }
-  const baselineFailRows = (r.inconclusive || []).filter((i) => /^baseline /.test(i.why));
-  const baselineFails = baselineFailRows.length;
-  // The wipeout check counts BOTH 'baseline' (ran-and-failed) and 'did-not-run' (skip/zero-match/
-  // timeout) rows: a probe set where every baseline is still the classic wrong-runner
-  // symptom (nothing legitimately ran), and this banner is advice ("...or the detected runner can't
-  // run them"), never an accusation — unlike the per-row ✗ listing just below, which stays scoped to
-  // baselineFailRows only, since a did-not-run row never earns the "already fail" label.
-  const baselineOrDidNotRunCount = (r.inconclusive || []).filter((i) => /^(baseline|did-not-run) /.test(i.why)).length;
-  const allBaselinesFailed = r.scored === 0 && baselineOrDidNotRunCount > 0 && baselineOrDidNotRunCount === (r.inconclusive || []).length && r.hollow.length === 0;
-  // The env-abort fail-fast (prove()) and this wipeout hint compose into ONE line: when the run stopped
-  // after the first N baselines all failed, the hint states that fact (first N failed, likely wrong runner
-  // or broken build/environment, fix it or --runner=<r>, M remaining not probed) instead of the plain
-  // "every baseline run failed" phrasing — never two contradictory messages. r.envAborted is undefined on
-  // an older/hand-built result, so that path stays byte-identical.
-  if (allBaselinesFailed && r.envAborted)
-    lines.push(`every baseline run failed before any mutation — the first ${baselineOrDidNotRunCount} all failed, so probing stopped (likely the wrong runner or a broken build/environment). Fix it or pass --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>. ${r.envAborted} remaining block(s) not probed.`);
-  else if (allBaselinesFailed)
-    lines.push(`every baseline run failed before any mutation — either these tests already fail, or the detected runner (${r.runner}) can't run them. Override with --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>.`);
-  // PARTIAL baseline failures — a first-class signal (wild-pilot HEAD-rot finding: failing-at-HEAD tests
-  // are common in the wild, and a partial set was previously silent here). A test that fails before any
-  // mutation can't verify anything; fix it first. Deliberately scoped to tests gutcheck PROBED (a baseline
-  // exists only for eligible blocks), never a whole-suite claim. The all-fail case above keeps its
-  // runner-suspicion framing instead (a total wipeout usually means the runner, not the tests).
-  else if (baselineFails > 0) {
-    lines.push('');
-    lines.push(`⚠️ ${baselineFails} probed test(s) already fail before any mutation — they verify nothing until they pass:`);
-    for (const i of baselineFailRows) lines.push(`  ✗ ${i.file}:${i.line}  '${i.name}'`);
-  }
-  if (r.capped) lines.push(`(${r.capped} block(s) not probed — probe cap or time budget reached; raise --max-probes/--time-budget or narrow --since.)`);
-  if (r.hollow.length) {
-    lines.push('');
-    lines.push(`${r.hollow.length} test(s) pass even when their function is gutted — they don't actually test it:`);
-    for (const h of r.hollow) lines.push(`  ✗ ${h.file}:${h.line}  '${h.name}'  — survives gutting ${h.survivors.join(', ')}()`);
-  } else if (r.scored > 0) lines.push(`✓ ${r.caught} function${r.caught === 1 ? '' : 's'} verified: gutted each, its test went red.${r.skipped.length ? ` ${r.skipped.length} test(s) skipped (see banner for reasons).` : ''}`);
-  // Identity-stub advisory (--deep): per-FUNCTION ratios, not a per-test list — no-op tests pass identity
-  // stubs by design (INTENTIONAL-NOOP / ACCIDENTAL-FIXED-POINT were the audit's two majority classes, and
-  // zero of the 13 audited survivors were fully-fixed-point-covered), so naming individual tests reads as
-  // an accusation the audit doesn't support. Never affects the exit code — advisory only.
-  if (r.weak && r.weak.length) {
-    lines.push('');
-    lines.push('identity-stub advisory (--deep): tests that pass when the function is replaced by a passthrough (counts are stub probes, not all binding tests)');
-    // A passed:0 fn had every identity stub CAUGHT — a success story, not an advisory — so it is omitted
-    // entirely (final-review wave, item 6). r.weak.length > 0 guarantees at least one fn has passed > 0.
-    for (const fn of Object.keys(r.weakSummary || {})) {
-      const { stubbed, passed } = r.weakSummary[fn];
-      if (!passed) continue;
-      lines.push(`  ~ ${fn}: ${passed} of ${stubbed} identity-stub probes passed — may cover only fixed points (no-op tests do this by design)`);
-    }
-  }
-  // One-sided tier (--deep): tests red under exactly one sentinel — they bind one direction of error
-  // (threshold/comparison oracles). A verdict, never a blocker; each row states the two observed runs.
-  if (r.oneSided && r.oneSided.length) {
-    lines.push('');
-    lines.push(...oneSidedLines(r.oneSided, 'breakdown'));
-    for (const o of r.oneSided) lines.push(`  ~ ${o.file}:${o.line}  '${o.name}'  — ${o.fn}() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
-  }
-  // Side signals: two existing inconclusive buckets that were silent in the report — a flaky test
-  // (unstable green re-run) and a title collision (two blocks share one runner selection). Neither is a
-  // verdict on the test, so neither counts toward hollow/caught; surfaced as a one-line heads-up so a
-  // reader doesn't read "0 hollow" as "everything sound" when some tests were simply unrunnable-as-a-
-  // verdict. Only when count > 0 — a clean run (no such buckets) emits neither line (byte-for-byte no-op).
-  const flakyN = (r.inconclusive || []).filter((i) => /^flaky baseline/.test(i.why)).length;
-  if (flakyN) { lines.push(''); lines.push(`${flakyN} test(s) unstable across identical reruns (rerun instability, not a verdict)`); }
-  const collisionN = (r.inconclusive || []).filter((i) => /^ambiguous title/.test(i.why)).length;
-  if (collisionN) { lines.push(''); lines.push(`${collisionN} title collision(s) — colliding titles break per-test selection (rename or qualify)`); }
-  return lines.join('\n');
-}
-
-// Diff-scoped human report (r.changeSummary present — a --since run). The verdict is the PRODUCT's
-// answer ("what happened to the diff I just wrote") and leads unconditionally as line 1; hollow findings
-// and already-failing baselines stay prominent right under it (never demoted); the whole-project probe
-// mechanics — what mutation/gutcheck.mjs's CLI used to print as a banner() preamble ahead of everything,
-// plus this function's own former "X/Y tests fail" and "✓ N verified" lines — collapse into ONE trailing
-// parenthesized footnote, so a reader never has to wade through whole-probed-set detail to find the
-// answer about their own diff. mutation/gutcheck.mjs's main() no longer calls banner() for this case.
-function formatDiffReport(r) {
-  const cs = r.changeSummary;
-  const lines = [];
-  // hollow>0 renders the count in CAPS and moves it right after "proven" for prominence.
-  const fnsWord = `${cs.fns} function${cs.fns === 1 ? '' : 's'} in this diff`;
-  const unverifiablePart = cs.unverifiable > 0 ? ` · ${cs.unverifiable} unverifiable` : '';
-  // Same-diff-oracle provenance + probe-cap-out-of-unverifiable (Task 7): both FACT-ONLY, both rendered
-  // only when their count is > 0 (undefined/0 on an older or hand-built changeSummary → no fragment,
-  // byte-identical to before either field existed). "via tests changed in this diff" states a fact about
-  // what changed alongside the proof, stated as fact, never as a verdict. "not probed (cap)" moves
-  // probe-cap fns out of the unverifiable bucket at the summary level (row status is unaffected).
-  const provenPart = (cs.sameDiffProven || 0) > 0 ? ` (${cs.sameDiffProven} via tests changed in this diff)` : '';
-  const provenWord = `${cs.proven} proven${provenPart}`;
-  const notProbedPart = (cs.notProbed || 0) > 0 ? ` · ${cs.notProbed} not probed (cap)` : '';
-  // Whole-scope hollows the changed-function rows don't carry: the exit code counts r.hollow across the
-  // WHOLE probed scope (a touched test file is probed whole-file), so a hollow whose survivor is not a
-  // changed function would otherwise exit 1 with a headline reading "0 hollow" — a silent false negative
-  // on THIS surface, the one a first-run user reads. extraHollowOf is the same set-subtraction
-  // formatMarkdown (mutation/gutcheck.mjs) renders as its ❌ section; both the headline fragment and the
-  // section below render only when non-empty, so a run with none stays byte-identical.
-  const extraHollow = extraHollowOf(r);
-  const extraHollowPart = extraHollow.length ? ` · ${extraHollow.length} HOLLOW beyond the diff` : '';
-  const body = cs.hollow > 0
-    ? `${provenWord}, ${cs.hollow} HOLLOW, ${cs.untested} with no binding test`
-    : `${provenWord}, ${cs.untested} with no binding test, ${cs.hollow} hollow`;
-  lines.push(`gutcheck: ${fnsWord} — ${body}${unverifiablePart}${notProbedPart}${extraHollowPart}.`);
-
-  // Baseline-already-failing tests: prominent, never folded into the footnote — a probed test that fails
-  // before any mutation verifies nothing until it passes, and the reviewer should fix it first.
-  const baselineFailRows = (r.inconclusive || []).filter((i) => /^baseline /.test(i.why));
-  // See formatFullScanReport's twin comment: the wipeout check widens to BOTH prefixes (a did-not-run
-  // row is still the classic wrong-runner symptom), while the per-row ✗ listing below stays scoped to
-  // baselineFailRows only — a did-not-run row never earns the "already fail" label.
-  const baselineOrDidNotRunCount = (r.inconclusive || []).filter((i) => /^(baseline|did-not-run) /.test(i.why)).length;
-  const allBaselinesFailed = r.scored === 0 && baselineOrDidNotRunCount > 0 && baselineOrDidNotRunCount === (r.inconclusive || []).length && r.hollow.length === 0;
-  if (allBaselinesFailed && r.envAborted) {
-    // See formatFullScanReport's twin: the env-abort tail folds INTO the wipeout hint, one coherent line.
-    lines.push('');
-    lines.push(`every baseline run failed before any mutation — the first ${baselineOrDidNotRunCount} all failed, so probing stopped (likely the wrong runner or a broken build/environment). Fix it or pass --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>. ${r.envAborted} remaining block(s) not probed.`);
-  } else if (allBaselinesFailed) {
-    lines.push('');
-    lines.push(`every baseline run failed before any mutation — either these tests already fail, or the detected runner (${r.runner}) can't run them. Override with --runner=<vitest|jest|mocha|ava|pytest|node|gradle|maven>.`);
-  } else if (baselineFailRows.length > 0) {
-    lines.push('');
-    lines.push(`⚠️ ${baselineFailRows.length} probed test(s) already fail before any mutation — they verify nothing until they pass:`);
-    for (const i of baselineFailRows) lines.push(`  ✗ ${i.file}:${i.line}  '${i.name}'`);
-  }
-  if (r.capped) { lines.push(''); lines.push(`(${r.capped} block(s) not probed — probe cap or time budget reached; raise --max-probes/--time-budget or narrow --since.)`); }
-
-  // Per-status detail: hollow is NEVER demoted — its receipted ✗ file:line 'name' — survives gutting
-  // fn() lines (plus the gutcheck --explain pointer) sit right under the verdict, same as the old
-  // execution-based r.hollow list did, but attributed to the specific CHANGED function per row (more
-  // precise than a bare survivors list when one block survives several changed functions).
-  const byStatus = (s) => r.changes.filter((c) => c.status === s);
-  const hollowFns = byStatus('hollow');
-  if (hollowFns.length) {
-    lines.push('');
-    lines.push(`hollow — the test passes even when the function is gutted; fix the test (receipt: gutcheck --explain <file:line>) (${hollowFns.length}):`);
-    for (const c of hollowFns) {
-      const b = c.evidence && c.evidence.blocks && c.evidence.blocks[0];
-      if (!b) continue;
-      // wrongLayerShadow (JVM-only, static — mutation/wrongLayerShadow.mjs) never ran a mutant at all, so
-      // it never earns "survives gutting" phrasing; it gets its own accurate tail instead.
-      const tail = c.evidence.reason === 'wrong-layer-shadow'
-        ? `re-implements the logic and asserts it against a second copy of itself (zero production contact): \`${c.evidence.echo}\``
-        : `survives gutting ${c.fn}()`;
-      lines.push(`  ✗ ${b.file}:${b.line}  '${b.name}'  — ${tail}`);
-    }
-  }
-  if (extraHollow.length) {
-    lines.push('');
-    lines.push(`hollow beyond the changed functions — a touched test file is probed whole-file, and these tests pass even when the function they verify is gutted; fix the test (receipt: gutcheck --explain <file:line>) (${extraHollow.length}):`);
-    for (const h of extraHollow) lines.push(`  ✗ ${h.file}:${h.line}  '${h.name}'  — still passes when ${(h.survivors || []).join(', ')}() is gutted`);
-  }
-  const untestedFns = byStatus('untested');
-  if (untestedFns.length) {
-    lines.push('');
-    lines.push(`no binding test — no test names ${untestedFns.length === 1 ? 'it' : 'them'} (${untestedFns.length}):`);
-    const names = untestedFns.map((c) => c.fn);
-    const shown = names.slice(0, 10).join(', ');
-    const more = names.length > 10 ? ` +${names.length - 10} more` : '';
-    lines.push(`  ${shown}${more}`);
-  }
-  // probe-cap out of `unverifiable` (Task 7): split at the DETAIL level too, mirroring the summary split
-  // above — a probe-cap row is real reference evidence, just never run under the cap, so it moves under
-  // the existing "(N block(s) not probed …)" note's own vocabulary instead of sitting alongside a
-  // genuinely-unverifiable (mock-only, etc.) row. Row status/reason are unchanged either way.
-  const unverifiableFns = byStatus('unverifiable').filter((c) => c.evidence.reason !== 'probe-cap');
-  if (unverifiableFns.length) {
-    lines.push('');
-    lines.push(`unverifiable — a test exists but I can't confirm it binds the function (${unverifiableFns.length}):`);
-    lines.push('  ' + unverifiableFns.map((c) => `${c.fn} (${readableUnverifiableReason(c.evidence.reason)})`).join(', '));
-  }
-  const notProbedFns = byStatus('unverifiable').filter((c) => c.evidence.reason === 'probe-cap');
-  if (notProbedFns.length) {
-    lines.push('');
-    lines.push(`not probed (cap) — probe cap or time budget reached before these could be checked (${notProbedFns.length}):`);
-    lines.push('  ' + notProbedFns.map((c) => c.fn).join(', '));
-  }
-
-  // Identity-stub advisory (--deep): see formatFullScanReport's comment — same per-function ratios.
-  if (r.weak && r.weak.length) {
-    lines.push('');
-    lines.push('identity-stub advisory (--deep): tests that pass when the function is replaced by a passthrough (counts are stub probes, not all binding tests)');
-    for (const fn of Object.keys(r.weakSummary || {})) {
-      const { stubbed, passed } = r.weakSummary[fn];
-      if (!passed) continue;
-      lines.push(`  ~ ${fn}: ${passed} of ${stubbed} identity-stub probes passed — may cover only fixed points (no-op tests do this by design)`);
-    }
-  }
-  // One-sided tier (--deep): see formatFullScanReport's comment — same tier, same rows.
-  if (r.oneSided && r.oneSided.length) {
-    lines.push('');
-    lines.push(...oneSidedLines(r.oneSided, 'inline'));
-    for (const o of r.oneSided) lines.push(`  ~ ${o.file}:${o.line}  '${o.name}'  — ${o.fn}() gutted: ${o.posRed ? 'red under the positive sentinel, passes under the negative one' : 'passes under the positive sentinel, red under the negative one'}`);
-  }
-  // Side signals (flaky rerun instability / title collision) — see formatFullScanReport's comment.
-  const flakyN = (r.inconclusive || []).filter((i) => /^flaky baseline/.test(i.why)).length;
-  if (flakyN) { lines.push(''); lines.push(`${flakyN} test(s) unstable across identical reruns (rerun instability, not a verdict)`); }
-  const collisionN = (r.inconclusive || []).filter((i) => /^ambiguous title/.test(i.why)).length;
-  if (collisionN) { lines.push(''); lines.push(`${collisionN} title collision(s) — colliding titles break per-test selection (rename or qualify)`); }
-
-  // The mechanics footnote: everything mutation/gutcheck.mjs's CLI used to print as a whole-probed-set
-  // banner() preamble ahead of the report, PLUS this function's former "X/Y tests fail" and "✓ N
-  // verified" lines, collapsed into one trailing line. The verdict above already answered "what happened
-  // to my diff"; this is "how gutcheck got there" for anyone who wants the receipt.
-  lines.push('');
-  lines.push(`  (probed ${r.probes} fn${r.probes === 1 ? '' : 's'} · ${r.caught}/${r.scored} bound · ${r.skipped.length} skipped · runner ${r.runner})`);
-  return lines.join('\n');
-}
-
-export function formatReport(r) {
-  if (r.scopeError) return `gutcheck: ${r.scopeError}`;
-  const body = r.changeSummary ? formatDiffReport(r) : formatFullScanReport(r);
-  return r.scopeWarning ? `gutcheck: warning: ${r.scopeWarning}\n${body}` : body;
 }
 
 // CLI: gutcheck prove [dir] [--since=<ref>] [--files=substr,substr] [--runner=R] [--deep] [--json]

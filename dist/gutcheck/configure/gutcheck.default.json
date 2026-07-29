@@ -87,7 +87,8 @@
           "rules": [
             {
               "id": "tautology-js-length-ge-0",
-              "patternSrc": "expect\\(\\s*[^)]*\\.(?:length|size)\\s*\\)\\s*\\.(?:toBeGreaterThanOrEqual\\(\\s*0\\s*\\)|toBeGreaterThan\\(\\s*-1\\s*\\))"
+              "patternSrc": "expect\\(\\s*[^)]*\\.(?:length|size)\\s*\\)\\s*\\.(?:toBeGreaterThanOrEqual\\(\\s*0\\s*\\)|toBeGreaterThan\\(\\s*-1\\s*\\))",
+              "blankStrings": true
             },
             {
               "id": "substring-of-derivable-numeric",
@@ -133,13 +134,16 @@
         "selfTest": {
           "mustFlag": [
             "expect(x).toBeCloseTo(3.14159, 5)",
-            "expect(x).toBe(85.83333333333333)"
+            "expect(x).toBe(85.83333333333333)",
+            "assert.strictEqual(computeGain(20), 6.0206)"
           ],
           "mustNotFlag": [
             "expect(x).toBeCloseTo(3.14159, 5) // CLOSED-FORM-ORACLE: pi",
             "expect(area).toBeCloseTo(78.54, 2) // pi * 5^2 = 78.54",
             "expect(n).toBe(3)",
-            "expect(d.asSeconds()).toBe(0.5)"
+            "expect(d.asSeconds()).toBe(0.5)",
+            "assert.strictEqual(d.asSeconds(), 0.5)",
+            "assert.strictEqual(gain, 6.0206); // 20 * 0.30103 = 6.0206"
           ]
         }
       },
@@ -254,6 +258,30 @@
             "const offenders = res.offenders || [];\nassert.deepEqual(offenders.map(o => o.check), []);",
             "expect(packageJson.dependencies ?? {}).toEqual({});",
             "const msg = `assert.deepEqual((res.offenders || []).map(o => o.check), []);`;"
+          ]
+        }
+      },
+      {
+        "id": "js-shadow-oracle-guard",
+        "kind": "shadowOracleGuard",
+        "severity": "advisory",
+        "description": "an expected-value assertion must not take its expected value from a LOCALLY-DEFINED helper that re-derives a NUMERIC production value; an imported (independent) oracle, a helper returning a dict/list/string/object, and an // INDEPENDENT-ORACLE: / // SHADOW-OK: marker are all exempt",
+        "params": {
+          "lang": "typescript"
+        },
+        "selfTest": {
+          "mustFlag": [
+            "function shadow(){ return 142.50; }\nexpect(total).toBe(shadow())",
+            "function recompute(){ return 5 * 3; }\nexpect(out).toBeCloseTo(recompute(), 2)",
+            "function recompute(){ return 5 * 3; }\nconst e = recompute();\nexpect(out).toBe(e)"
+          ],
+          "mustNotFlag": [
+            "expect(area).toBeCloseTo(78.54, 2)",
+            "function indep(){ return 142.50; }\n// INDEPENDENT-ORACLE: cross-checked against the spec table\nexpect(total).toBe(indep())",
+            "expect(total).toBe(referenceTotal())",
+            "const e = referenceTotal();\nexpect(out).toBe(e)",
+            "function makeItem(){ return { value: 3 }; }\nexpect(load(dump(makeItem()))).toEqual(makeItem())",
+            "function urlToOrigin(u){ return new URL(u); }\nexpect(pool.url).toEqual(urlToOrigin(expected))"
           ]
         }
       }

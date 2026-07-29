@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'node:fs';
 import { dirname, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { advise } from './advise.mjs';
 
 const GUTCHECK_PATH = fileURLToPath(new URL('./gutcheck.mjs', import.meta.url));
 
@@ -271,7 +272,10 @@ function buildResidue(jsonText, harness) {
 // SCORED: a working runner proves those failures are the tests' own, while an ALL-baselines-failed
 // wipeout usually means the runner cannot run them at all and must never nag the agent over runner noise.
 // Ported verbatim from the bash hook's third embedded `node -e` program (the block+clean-voice builder).
-function buildVerdict(jsonText, harness) {
+// `advisory` (string|null, from advise()) rides the channels this function ALREADY has: appended to the
+// block reason when there is a block, appended to the clean voice when it speaks, standalone only under
+// the guard below. It never mints a block.
+function buildVerdict(jsonText, harness, advisory) {
   let r; try { r = JSON.parse(jsonText); } catch { return null; }
   const h = (r && r.hollow) || [];
   const failing = ((r && r.inconclusive) || []).filter((i) => /^baseline /.test(i.why));
@@ -288,8 +292,19 @@ function buildVerdict(jsonText, harness) {
       const provenPart = sameDiffProven > 0 ? ` (${sameDiffProven} via tests changed in this diff)` : '';
       const notProbedPart = notProbed > 0 ? `, ${notProbed} not probed (cap)` : '';
       const msg = `gutcheck: of ${cs.fns} function(s) you changed — ${cs.proven} proven${provenPart}, ${cs.untested} with no binding test${unverifiable > 0 ? `, ${unverifiable} unverifiable` : ''}${notProbedPart}. (npx gutcheck --explain <file:line> for a receipt.)`;
-      return harness.channels.voice ? harness.renderVoice(msg) : null;
+      const full = advisory ? `${msg}\n${advisory}` : msg;
+      return harness.channels.voice ? harness.renderVoice(full) : null;
     }
+    // STANDALONE ADVISORY: no hollow, no failing test, and no changed function either — the agent
+    // touched only tests, so the probe has nothing to say and the checker is the only signal. This is
+    // the case the advisory exists for and must not be suppressed.
+    //
+    // GUARD, not an observation: never turn a null into a message for a memoOneShot harness. The stamp
+    // site below treats ANY non-null output as a block, so an advisory-only message would be stamped
+    // blockedAt and then have its own later message wrongly suppressed as "already blocked".
+    // channels.voice alone would suffice today (every memoOneShot harness keeps voice off); the explicit
+    // !memoOneShot keeps that reason readable here rather than 200 lines away in a harness entry.
+    if (advisory && harness.channels.voice && !harness.memoOneShot) return harness.renderVoice(advisory);
     return null;
   }
   const parts = [];
@@ -321,7 +336,9 @@ function buildVerdict(jsonText, harness) {
       `Run them and fix the failure before finishing:\n${lines.join('\n')}`);
   }
   const reason = parts.join('\n\n');
-  return harness.channels.block ? harness.renderBlock(reason) : null;
+  // Evidence appended to a blocker that already exists — this row cannot mint one.
+  const full = advisory ? `${reason}\n\n${advisory}` : reason;
+  return harness.channels.block ? harness.renderBlock(full) : null;
 }
 
 // runGate({ harnessName, dir, stdinText, env }) -> string|null   (the stdout payload, null = silence)
@@ -389,7 +406,13 @@ export function runGate({ harnessName, dir, stdinText, env = {} }) {
     if (prior && prior.blockedAt === memoKey) return null; // already blocked once on this exact diff — refuse to reblock
   }
 
-  const out = buildVerdict(json, harness);
+  // Static evidence on the test files this diff changed. Wrapped: the gate fails OPEN, so a throw in the
+  // checker must cost the advisory, never the gate. Deliberately NOT computed on the loop-guard path
+  // above — that path is memo-only and must stay instant.
+  let advisory = null;
+  try { advisory = advise(realDir, baseline); } catch { advisory = null; }
+
+  const out = buildVerdict(json, harness, advisory);
   if (harness.memoOneShot && out !== null) {
     // CONSTRAINT, not an observation: every memoOneShot harness MUST keep voice and residue OFF. This
     // stamp treats ANY non-null `out` as a block — it has no way to tell a block apart from a clean-voice

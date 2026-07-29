@@ -11,6 +11,14 @@ import { toPosix } from '../mutation/prove.mjs';
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const OUT = join(ROOT, 'dist', 'gutcheck');
 
+// The probe's sandbox work copy has no dist/ (mutation/prove.mjs SKIP_DIRS excludes build output), so
+// every dist-reading assertion here reported "already failing — verifies nothing" on each dogfood run:
+// permanent noise, never signal. Skip WITH the stated reason exactly when dist/ is absent — in the
+// working tree, CI, and any real checkout dist/ is committed, the condition is false, and every test
+// runs. A skipped run parses as 0 passed/0 failed, which the probe routes to inconclusive — it can
+// never mint a hollow (see nodeEffectiveCounts's fail-closed contract in mutation/runners.mjs).
+const DIST_SKIP = !existsSync(OUT) && 'dist/gutcheck absent (the probe sandbox copy excludes build output)';
+
 function walk(d, acc = []) {
   for (const e of readdirSync(d).sort()) {
     const p = join(d, e);
@@ -19,7 +27,7 @@ function walk(d, acc = []) {
   return acc;
 }
 
-test('dist/gutcheck is in sync with the source (no drift)', () => {
+test('dist/gutcheck is in sync with the source (no drift)', { skip: DIST_SKIP }, () => {
   for (const { src, distRel } of copyPlan()) {
     const distPath = join(OUT, distRel);
     assert.ok(existsSync(distPath), `missing in dist: ${distRel} — run npm run build:plugin`);
@@ -27,7 +35,7 @@ test('dist/gutcheck is in sync with the source (no drift)', () => {
   }
 });
 
-test('dist/gutcheck has no orphan files (everything is accounted for by the copy plan)', () => {
+test('dist/gutcheck has no orphan files (everything is accounted for by the copy plan)', { skip: DIST_SKIP }, () => {
   // Both sides toPosix'd: copyPlan()'s distRel is already POSIX-built (template-literal joined, not
   // path.relative), but relative(OUT, f) below emits native separators — backslash on win32 — so an
   // un-normalized comparison would flag every real file as a "stale" orphan on that platform.
@@ -40,7 +48,7 @@ test('dist/gutcheck has no orphan files (everything is accounted for by the copy
   }
 });
 
-test('the plugin manifest is stamped from package.json (one version source)', () => {
+test('the plugin manifest is stamped from package.json (one version source)', { skip: DIST_SKIP }, () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
   const committed = JSON.parse(readFileSync(join(OUT, '.claude-plugin', 'plugin.json'), 'utf8'));
   assert.equal(committed.version, pkg.version);
@@ -54,7 +62,7 @@ test('the marketplace points at the one bundle', () => {
   assert.equal(mp.plugins[0].source, './dist/gutcheck');
 });
 
-test('dist ships 1 discipline skill + 1 citation agent + the LICENSE', () => {
+test('dist ships 1 discipline skill + 1 citation agent + the LICENSE', { skip: DIST_SKIP }, () => {
   const plan = copyPlan();
   assert.equal(plan.filter((p) => p.distRel.endsWith('SKILL.md')).length, 1);
   assert.equal(plan.filter((p) => p.distRel.startsWith('agents/')).length, 1);
@@ -66,7 +74,7 @@ test('dist ships 1 discipline skill + 1 citation agent + the LICENSE', () => {
 // The whole point of bundling: an installed plugin can RUN the checker without cloning the repo.
 // These prove the checker code + a generic config floor travel with dist, and that dist is generated
 // (not a stale hand-copy) by pinning the bundled core to the repo source byte-for-byte.
-test('dist bundles the runnable checker + a generic 6-check config floor', () => {
+test('dist bundles the runnable checker + a generic 7-check config floor', { skip: DIST_SKIP }, () => {
   assert.ok(existsSync(join(OUT, 'checker', 'cli.mjs')), 'dist must bundle checker/cli.mjs');
   const distCore = join(OUT, 'checker', 'core.mjs');
   assert.ok(existsSync(distCore), 'dist must bundle checker/core.mjs');
@@ -75,14 +83,14 @@ test('dist bundles the runnable checker + a generic 6-check config floor', () =>
   const cfgPath = join(OUT, 'gutcheck.config.json');
   assert.ok(existsSync(cfgPath), 'dist must bundle a generic gutcheck.config.json');
   const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
-  assert.equal(cfg.checker.checks.length, 6, 'the bundled config floor must carry exactly 6 checks');
+  assert.equal(cfg.checker.checks.length, 7, 'the bundled config floor must carry exactly 7 checks');
 });
 
 // End-to-end: the BUNDLED artifact actually runs, not just that the files are present. The bundled
 // skill + agent prose (dist/gutcheck/skills, dist/gutcheck/agents) is itself a known-clean harness —
 // self-hosting, so no separate fixture pack is needed — and a nonexistent test dir makes the
 // test-source checks vacuous → the bundled checker must exit 0 / OK.
-test('the bundled checker runs and reports OK on its own bundled harness', () => {
+test('the bundled checker runs and reports OK on its own bundled harness', { skip: DIST_SKIP }, () => {
   const out = execFileSync('node', [
     join(OUT, 'checker', 'cli.mjs'),
     '--config', join(OUT, 'gutcheck.config.json'),
@@ -90,13 +98,13 @@ test('the bundled checker runs and reports OK on its own bundled harness', () =>
     '--repo-root', OUT,
     '--src-test', join(OUT, '__no_such_test_dir__'),
   ], { encoding: 'utf8' }); // execFileSync throws on a nonzero exit → an offender/meta-guard fails the test
-  assert.match(out, /OK — 6 checks passed/, 'bundled checker must report OK on its own bundled harness');
+  assert.match(out, /OK — 7 checks passed/, 'bundled checker must report OK on its own bundled harness');
 });
 
 // The configure skill runs the BUNDLED detector against the adopter's repo with no clone. These prove
 // detect.mjs + the two data files it needs travel with dist, that detect.mjs is generated (byte-for-byte
 // the repo source), and that gutcheck.default.json sits next to it (detect.mjs reads it as a sibling).
-test('dist bundles the configure detector + its data files (byte-identical to the repo source)', () => {
+test('dist bundles the configure detector + its data files (byte-identical to the repo source)', { skip: DIST_SKIP }, () => {
   const distDetect = join(OUT, 'configure', 'detect.mjs');
   assert.ok(existsSync(distDetect), 'dist must bundle configure/detect.mjs');
   assert.equal(readFileSync(distDetect, 'utf8'), readFileSync(join(ROOT, 'configure', 'detect.mjs'), 'utf8'),
@@ -119,15 +127,15 @@ test('dist bundles the configure detector + its data files (byte-identical to th
 
 // End-to-end: the BUNDLED detector actually runs from dist (not just that the files are present). It
 // reads its sibling gutcheck.default.json at import — if that file did not travel, this throws / exits
-// nonzero. A throwaway Node fixture must yield a draft carrying the full six-check checker floor.
-test('the bundled detector runs from dist and emits a checker floor', () => {
+// nonzero. A throwaway Node fixture must yield a draft carrying the full seven-check checker floor.
+test('the bundled detector runs from dist and emits a checker floor', { skip: DIST_SKIP }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'gc-bundled-detect-'));
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'demo', scripts: { test: 'node --test' } }));
     const out = execFileSync('node', [join(OUT, 'configure', 'detect.mjs'), dir], { encoding: 'utf8' });
     const draft = JSON.parse(out); // throws if the bundled detector printed non-JSON
     assert.ok(draft.checker && Array.isArray(draft.checker.checks), 'bundled detector must emit a checker.checks block');
-    assert.equal(draft.checker.checks.length, 6, 'a Node project must get the full six-check floor from the bundled detector');
+    assert.equal(draft.checker.checks.length, 7, 'a Node project must get the full seven-check floor from the bundled detector');
     assert.equal(draft._detected.buildSystem, 'node');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -137,7 +145,7 @@ test('the bundled detector runs from dist and emits a checker floor', () => {
 // Regression: the bundled mutation/gutcheck.mjs CLI imports ../checker/standalone.mjs + core.mjs, so
 // checker/ must travel with dist or the installed plugin's CLI dies with ERR_MODULE_NOT_FOUND. Prove the
 // shipped CLI actually starts, and that mutation/ is bundled byte-identical (generated, not a stale copy).
-test('the installed-plugin CLI runs (checker/ + mutation/ are bundled, no ERR_MODULE_NOT_FOUND)', () => {
+test('the installed-plugin CLI runs (checker/ + mutation/ are bundled, no ERR_MODULE_NOT_FOUND)', { skip: DIST_SKIP }, () => {
   const out = execFileSync('node', [join(OUT, 'mutation', 'gutcheck.mjs'), '--version'], { encoding: 'utf8' });
   assert.match(out, /gutcheck/, 'shipped `gutcheck --version` must run and print a version');
   // every top-level mutation/*.mjs must travel byte-identical (dist is generated, not a stale hand-copy)
@@ -156,7 +164,7 @@ test('marketplace.json lists the gutcheck plugin with a repo-relative source', (
   assert.ok(p.source.startsWith('./'), 'plugin source must be a repo-relative ./ path');
 });
 
-test('dist/gutcheck ships the SessionStart + UserPromptSubmit hooks byte-identical to the source', () => {
+test('dist/gutcheck ships the SessionStart + UserPromptSubmit hooks byte-identical to the source', { skip: DIST_SKIP }, () => {
   for (const f of ['hooks.json', 'session-start', 'user-prompt-submit']) {
     const distPath = join(OUT, 'hooks', f);
     assert.ok(existsSync(distPath), `missing in dist: hooks/${f} — run npm run build:plugin`);

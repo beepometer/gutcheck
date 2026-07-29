@@ -1,7 +1,9 @@
 # Developing Gutcheck
 
 Gutcheck is one product: the mutation probe (`mutation/`) with its CLI front door (`gutcheck`), a
-sub-second lint (three checker kinds via `checker/`), and the opt-in agent hooks (`hooks/`), shipped
+sub-second lint (10 checker kinds in `checker/kinds/`, of which `gutcheck lint` runs the 4 that earned
+a fail seat by corpus measurement; `configure` emits a 7-check floor for adopters), and the opt-in
+agent hooks (`hooks/`), shipped
 as a CLI (npm) and a Claude Code plugin (`dist/gutcheck`).
 
 ## Layout
@@ -15,7 +17,8 @@ as a CLI (npm) and a Claude Code plugin (`dist/gutcheck`).
   `checksets/python.mjs`.
 - `skills/`, `agents/`, `hooks/` — plain markdown/bash, maintained in place (no templating).
 - `dist/gutcheck` — the installable plugin bundle. **Generated**: `npm run build:plugin` copies the
-  source dirs verbatim and stamps `.claude-plugin/plugin.json` from `package.json`. Never hand-edit;
+  source dirs verbatim and stamps `.claude-plugin/plugin.json` from `pluginManifest()` (version from
+  `package.json`, the rest literal in the script). Never hand-edit;
   `test/plugin-dist.test.mjs` enforces byte-sync + no orphans.
 
 ## Gates — keep them green

@@ -14,7 +14,7 @@ fix it.
 **Core principle:** report the tool's own exit code and lines verbatim — never paraphrase a clean result over a
 real finding — then repair each at its source, never by making the number look right.
 
-## 1 — Prove the tests catch their code (the mutation score)
+## 1 — Run the mutation probe (execution-proven, not guessed)
 
 `prove` guts each tested function with a guaranteed-wrong return and runs only that test. A test that still
 passes is re-gutted with an opposite-signed wrong return before any accusation: green under **both** is
@@ -27,7 +27,7 @@ execution-proven, not a guess.
 - **REPO** — the project under test. On Claude Code: `"${CLAUDE_PROJECT_DIR}"`; else the repo root you were invoked in.
 
 ```bash
-node "<PROVE>" "<REPO>"                 # a mutation score + the hollow tests, across the repo
+node "<PROVE>" "<REPO>"                 # caught/scored counts + the hollow tests, across the repo
 node "<PROVE>" "<REPO>" --since=<ref>   # scope to tests touched by changes since <ref> — fast; the after-a-change case
 ```
 
@@ -53,13 +53,14 @@ assertion, gut a single function directly:
 node "<CHECKER>" --config "<CONFIG>" --repo-root "<REPO>" --src-test "<TESTDIR>"
 ```
 
-The floor is language-gated. JS/TS (`node`) gets six deterministic source-discipline checks: hollow/leaky
+The floor is language-gated. JS/TS (`node`) gets seven deterministic source-discipline checks: hollow/leaky
 **test shapes**, **uncited expected floats**, **inline-derivation coherence**, **same-call assertion
-consistency**, **empty-fallback collapse** (a `|| []`/`?? {}` upstream of a compare-to-empty assertion), and
-external **value-citations missing a URL**. Python swaps a **shadow-oracle** check in for empty-fallback
-collapse — same six-check count, different member. Every other detected build system (Gradle/Kotlin, Maven/Java,
-C++, C#, Rust, Go, Swift, PHP, Julia, Ruby, Haskell, Fortran) gets only the one language-agnostic value-citation
-check until its own check set is calibrated in — expect one finding class there, not six. Drop any flag whose
+consistency**, **empty-fallback collapse** (a `|| []`/`?? {}` upstream of a compare-to-empty assertion),
+external **value-citations missing a URL**, and an advisory **shadow-oracle** guard (reported, never failing
+the run). Python carries six, swapping a failing **shadow-oracle** check in for empty-fallback collapse.
+Every other detected build system (Gradle/Kotlin, Maven/Java, C++, C#, Rust, Go, Swift, PHP, Julia, Ruby,
+Haskell, Fortran) gets only the one language-agnostic value-citation check until its own check set is
+calibrated in — expect one finding class there, not seven. Drop any flag whose
 input did not resolve, then read the exit code AND the output:
 
 - `META-GUARD FAILED` → **surface it loudly and stop.** The checker refused to run because one of its own guards failed its self-test. Do NOT present any result as clean — report the failing guard verbatim.

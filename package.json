@@ -1,7 +1,7 @@
 {
   "name": "gutcheck",
-  "version": "0.5.0",
-  "description": "Prove your AI-written tests actually test your code: a diff-scoped mutation probe that guts each tested function and reruns only its test — plus a sub-second lint and a Claude Code Stop hook that re-probes what an agent just changed.",
+  "version": "0.6.0",
+  "description": "Diff-scoped mutation probe for AI-written tests: guts each changed function and reruns only its own tests, reporting proven, hollow, one-sided, unverifiable, or no binding test — each with a replayable receipt.",
   "type": "module",
   "license": "MIT",
   "keywords": [

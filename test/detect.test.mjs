@@ -106,7 +106,7 @@ test('a Node project gets the full source-discipline floor (ids == the shipped d
   try {
     const d = detect(dir);
     assert.deepEqual(ids(d), ids(DEFAULT_CFG));
-    assert.equal(d.checker.checks.length, 6);
+    assert.equal(d.checker.checks.length, 7);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -167,4 +167,31 @@ test('the emitted floor self-validates: runMetaGuard(buildChecks(detect(node)))=
   try {
     assert.deepEqual(runMetaGuard(buildChecks(detect(dir))), []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// shadowOracleGuard's own header claims it is active in the Node floor; it was dropped in the v0.2
+// floor cut and only the Python variant survived. Restored as ADVISORY: it has never had a JS corpus
+// sweep, so it must be reported without failing an adopter's run (checker/core.mjs:96), and it rides
+// the done-claim advisory line to be field-measured before any promotion to LINT_KINDS.
+test('detect: the node floor carries an advisory shadow-oracle guard', () => {
+  const d = mkdtempSync(join(tmpdir(), 'gc-detect-shadow-'));
+  try {
+    writeFileSync(join(d, 'package.json'), '{"name":"x","type":"module"}');
+    const cfg = detect(d);
+    const spec = cfg.checker.checks.find((c) => c.kind === 'shadowOracleGuard');
+    assert.ok(spec, 'the node floor must register a shadowOracleGuard check');
+    assert.equal(spec.severity, 'advisory', 'unswept on JS — reported, never a failure');
+    assert.ok(spec.selfTest.mustFlag.length > 0 && spec.selfTest.mustNotFlag.length > 0,
+      'a floor check without both fixture sets cannot pass the meta-guard');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// The meta-guard is the keystone: it must pass over the WHOLE emitted floor, including the new spec's
+// fixtures, before any scan runs.
+test('detect: the emitted node floor passes the meta-guard end to end', () => {
+  const d = mkdtempSync(join(tmpdir(), 'gc-detect-meta-'));
+  try {
+    writeFileSync(join(d, 'package.json'), '{"name":"x","type":"module"}');
+    assert.deepEqual(runMetaGuard(buildChecks(detect(d))), []);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

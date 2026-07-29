@@ -1,4 +1,4 @@
-# gutcheck — prove your AI-written tests actually test your code, as a PR gate.
+# gutcheck — guts each changed function and reruns only its own tests, as a PR gate.
 # Copy to .github/workflows/gutcheck.yml in your repo. Two modes are shown; keep one.
 #
 # Requires the `gutcheck` CLI on PATH (e.g. published to npm, or `npx -p <pkg> gutcheck`).

@@ -30,6 +30,32 @@ test file's imports. Direct calls and constructed instances both resolve inline 
 mock-constructed receivers are skipped, never guessed. Tests importing build output such as `dist/`
 are typically unverifiable—build output is never mutated.
 
+JS/TS imports resolve through declarative path aliases: package.json `imports` (`#src/util`) and
+tsconfig/jsconfig `compilerOptions.paths` (`~/util`, `@/util`, with `baseUrl` and one `extends` hop),
+with tsc's own precedence (exact over wildcard, longest prefix, first existing target). Aliases
+defined in code are out of reach—vitest `resolve.alias`, jest `moduleNameMapper` in a `.js` config,
+webpack aliases—a config computed by code cannot be read statically without guessing, so tests
+importing through one report `unverifiable`.
+
+A namespace import's member calls resolve the same way: `_.sort(...)` under `import * as _ from '..'`
+—or its CJS form, `const R = require('..')`—binds `sort` to the target module's export, through the
+same declaration-then-barrel-hop core. Only a true namespace binding credits: a DEFAULT import's
+members are properties of one exported value, never resolved; a mock-tainted test file, a shadowed,
+re-declared, or monkey-patched receiver, and a CJS module whose `module.exports` is reassigned to a
+non-object-literal all refuse. TS NodeNext specifiers (`./struct.js` naming a `.ts` source) resolve
+by extension swap only when no literal file exists—an on-disk `.js` always wins first.
+
+A test that reaches its function through a re-export barrel (an `index.ts` aggregating a package's
+public surface) resolves through ONE hop of re-export: the probe follows the test file's imports, and
+when the imported file only forwards the name—`export { x } from './y.mjs'` same-name, or
+`export * from './y.mjs'` with exactly one forwarded file declaring it—it looks for the declaration one
+file further. Anything less certain refuses and reports `unverifiable`—never a guessed verdict: an
+aliased re-export (`sum as x`—the declared name differs from the tested name), a chain deeper than one
+hop, a `export *` fan-out where more than one target declares the name, or a CommonJS barrel
+(`module.exports` forwarding). A codebase whose barrels take one of those refused shapes carries that
+blind spot across its whole probeable surface, reported as `unverifiable` (tested function not
+locatable).
+
 Reach is bimodal: strong on value-pinning pure-logic code, much thinner on DSL-heavy, mock-heavy,
 UI, or dependency-injection-heavy code, where few functions can be probed at all. There the
 untested and unverifiable columns carry the coverage information instead of the probe.
@@ -97,5 +123,41 @@ any test run, never guessed at.
 ## Platforms
 
 Hooks are bash and run on macOS and Linux. The CLI and the action run anywhere Node 20+ runs.
+
+## Calibration, and what it means each check misses
+
+Each checker kind's thresholds were derived by running it over real repositories and inspecting every
+finding. What follows is the record of what those sweeps found and, for each, the blind spot the fix
+created. These are limits, not results—no catch rate is claimed anywhere, because none has been
+measured.
+
+**`magicLiteralGuard`**—flags a numeric literal in an expected-value assertion that carries no
+derivation. On a JavaScript sweep, 5 of 5 findings were one-digit decimals (`0.5`, `1.5`), each the
+self-evident result of an input literal in the same call. The `toBe`/`toEqual` threshold was raised to
+three or more fractional digits; `toBeCloseTo` stays broad. **Consequence: an uncited integer
+expectation is never flagged.** A test that pins `42` where the right answer is `43` reads as `proven`
+by the probe and draws no comment from the checker. This is the honest limit of the "wrong pinned
+literal" concern—the check closes uncited golden floats, not the vector.
+
+**`derivationCoherence`**—flags an inline arithmetic derivation comment that does not compute the
+asserted value. A sweep produced 0 findings across 9 repositories, with four distinct
+parser-mechanism causes for the misses. Variables and units are skipped by design, so only
+fully-numeric inline derivations are checked.
+
+**`fallbackCollapse`**—flags a compare-to-empty assertion whose actual expression launders an absent
+field through a `|| []` / `?? {}` fallback. Restricted to call-derived fallbacks—a fallback over a
+static field with no call upstream is not flagged. Promoted to the lint set on a corpus sweep of 16 true
+findings and 0 false positives within that restriction.
+
+**`shadowOracleGuard`**—flags an expected value taken from a locally-defined helper that re-derives a
+number. Out of reach by design: re-running the imported system under test into a variable
+(`const e = sut(); expect(sut()).toBe(e)`), because nothing in the text distinguishes the production
+symbol from an independent oracle.
+
+**`selfComparisonOracle`**—flags an assertion whose two sides are textually identical calls. Measured
+and **not** shipped in any default configuration: real repositories produce it at a high base rate with
+close to zero defect yield, because it usually encodes a deliberate determinism check. The probe owns
+the harmful subset, since it can tell a self-comparison that survives gutting from one that doesn't.
+The kind remains available to an explicit configuration.
 
 See also: [how it works](how-it-works.md), [CLI reference](cli.md).

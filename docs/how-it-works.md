@@ -32,6 +32,25 @@ Under a probe cap, test files changed in the diff are probed first.
 
 None of these paths can produce a false hollow or a false proven.
 
+## Two layers, one of which blocks
+
+Gutcheck has two independent verifiers, and only one of them can stop you.
+
+The **probe** decides by execution. It rewrites a function to return a guaranteed-wrong value, reruns
+that function's own tests, and confirms any accusation with a second, opposite-signed rewrite. A
+confirmed `hollow`, and a changed test that already failed before any mutation, are the only two
+signals that block a done-claim.
+
+The **checker** decides by reading. It is a set of deterministic per-kind detectors, each carrying
+must-flag and must-not-flag fixtures it must satisfy before any scan runs. It reaches tests the probe
+cannot — a test whose function can't be located, a mock-heavy suite, a diff with nothing probeable —
+and at the done-claim it reports what it finds as a non-blocking advisory line. It cannot block, and
+that is deliberate: a static detector's false positive costs attention, while a blocking false
+positive costs a stuck agent session.
+
+So a verdict you can be stopped by was always produced by running your code. Everything the checker
+contributes is evidence you can ignore.
+
 ## The self-check
 
 Before reporting anything, gutcheck runs a self-check in a scratch directory: it plants one fake

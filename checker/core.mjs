@@ -31,6 +31,11 @@ function makeCheck(spec, config) {
       if (kind.preflight) out.push(...kind.preflight(spec, config, ctx).map((o) => ({ line: 0, ...o })));
       const env = kind.runEnv(spec, config, ctx);
       for (const file of kind.corpus(spec, config, ctx)) {
+        // Optional diff-scoping seam: mutation/advise.mjs admits only the test files this diff changed.
+        // Applied here, in the dispatch loop, so it scopes EVERY kind without any kind knowing about it —
+        // narrowing ctx.testSrcRoots instead would drag in every unchanged sibling of a changed file.
+        // Absent filter → byte-identical behavior. ctx survives normalizeCtx's leading `...ctx` spread.
+        if (ctx.fileFilter && !ctx.fileFilter(file)) continue;
         if (!existsSync(file)) continue; // a corpus selector should not crash the runner on a missing file
         for (const o of kind.detect(readFileSync(file, 'utf8'), env)) out.push({ file: relPath(file, ctx), ...o });
       }
