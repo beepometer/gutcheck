@@ -5,8 +5,6 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![node ≥ 20](https://img.shields.io/badge/node-%E2%89%A5%2020-brightgreen)
 
-![gutcheck's Stop hook on three done-claims: a pass whose receipt names the untested function, a block on the hollow quick-fix, and an all-proven pass](docs/assets/demo.gif)
-
 Gutcheck is a deterministic verification gate for AI coding agents. It runs when an agent marks
 a task complete (and on pull requests) and checks whether each changed function is verified by a test.
 Its report shows which functions are **proven**, which have **no binding test**, and which have
