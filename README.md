@@ -70,7 +70,7 @@ changed test that already fails before any mutation runs. Each finding names its
 a failing test, the runner's own failure text:
 
 ```
-- test/cart.test.mjs:9 'computes the total' — stays green even when computeTotal() (src/cart.mjs) returns a wrong value.
+  - test/cart.test.mjs:9 'computes the total' — stays green even when computeTotal() (src/cart.mjs) returns a wrong value.
 ```
 
 Untested or unverifiable functions never block. The probe is diff-scoped, capped (20 functions,
@@ -116,9 +116,9 @@ false` reports without failing.
 
 | Function | File | Status | Evidence |
 | --- | --- | --- | --- |
-| `countItems` | src/cart.mjs | proven | test/cart.test.mjs:7 'counts items' went red when gutted |
-| `computeTotal` | src/cart.mjs | hollow | test/cart.test.mjs:9 'computes the total' still passes when gutted |
-| `applyDiscount` | src/cart.mjs | untested | no test mentions it |
+| `countItems` | src/cart.mjs | ✅ proven | test/cart.test.mjs:7 'counts items' went red when gutted |
+| `computeTotal` | src/cart.mjs | ❌ hollow | test/cart.test.mjs:9 'computes the total' still passes when gutted |
+| `applyDiscount` | src/cart.mjs | ∅ untested | no test mentions it |
 
 *Evidence classes: **proven/hollow** are execution-backed (we mutated the function and reran its test). **unverifiable/untested** are name-search (a same-named function elsewhere can confuse them). Only value-pinning tests with locatable functions are probeable — the per-reason skip breakdown is in the default report and `--json` output.*
 
@@ -155,7 +155,7 @@ hollow — the test passes even when the function is gutted; fix the test (recei
 no binding test — no test names it (1):
   applyDiscount
 
-  (probed 2 fns · 1/2 bound · 0 skipped · runner node)
+  (probed 3 fns · 1/2 bound · 0 skipped · runner node)
 ```
 
 *countItems is proven (gutting it made its test go red) so it gets no line of its own—only

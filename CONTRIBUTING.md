@@ -18,24 +18,24 @@ validate an isolated artifact instead, `npm pack` and install the tarball:
 
 Every change must pass:
 
-- **`npm test`** — the whole suite: the probe, the CLI, the lint kinds, the hooks, and dist-no-drift.
+- **`npm test`**—the whole suite: the probe, the CLI, the lint kinds, the hooks, and dist-no-drift.
   This is Gutcheck's own self-check and runs in CI on every push.
-- **`npm run build:plugin`** — must rebuild `dist/gutcheck` byte-identically (running it twice leaves
+- **`npm run build:plugin`**—must rebuild `dist/gutcheck` byte-identically (running it twice leaves
   `git status` clean).
 - Dogfood the probe: `node mutation/gutcheck.mjs . --max-probes=2000` should report **0 hollow** on this
   repo (the flag overrides the default cap of 40 so every function is covered). If it flags one of our
-  tests, fix the test — that is the product working.
+  tests, fix the test—that is the product working.
 
 ## Editing a skill or agent
 
-`skills/` and `agents/` are plain markdown, maintained in place — edit the file directly, no
+`skills/` and `agents/` are plain markdown, maintained in place—edit the file directly, no
 intermediate build step to keep in sync. Then rebuild the plugin:
 
 1. Edit `skills/check/SKILL.md` or `agents/citation-verifier.md`.
 2. Rebuild the plugin: `npm run build:plugin`—it copies the source dirs verbatim into `dist/gutcheck`
    and stamps `.claude-plugin/plugin.json` from `package.json`.
 
-Never hand-edit anything under `dist/` — it is generated. After any edit that renames a heading or
+Never hand-edit anything under `dist/`—it is generated. After any edit that renames a heading or
 trims a section, grep the repo to confirm no path cross-reference now dangles (the gates do not catch
 every dangling reference).
 

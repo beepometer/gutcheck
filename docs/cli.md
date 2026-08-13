@@ -22,8 +22,8 @@ gutcheck [path] --runner=<r>      override the detected runner (vitest jest moch
 gutcheck [path] --max-probes=<n>  cap probed functions (bounds latency on a big diff; default 40)
 gutcheck [path] --no-fallback     never widen an empty --since scope to a full-suite scan (the agent hook, CI)
 gutcheck --no-self-check          skip the startup self-check (probe mode only; not recommended)
-gutcheck [path] --time-budget=<s> wall-clock cap for the whole probe pass — analysis and probing; blocks past the budget report as unverifiable (probe-cap), never guessed
-gutcheck [path] --deep            costlier evidence, same coverage — roughly double the mutant runs on the same probeable tests.
+gutcheck [path] --time-budget=<s> wall-clock cap for the whole probe pass—analysis and probing; blocks past the budget report as unverifiable (probe-cap), never guessed
+gutcheck [path] --deep            costlier evidence, same coverage—roughly double the mutant runs on the same probeable tests.
                                   By default only a candidate hollow is confirmed against the opposite-signed sentinel (hollow =
                                   green under BOTH directions; red under exactly one = one-sided, a verdict that never blocks).
                                   --deep extends both-sentinel evidence to the proven side, demoting one-direction-only proofs to
@@ -59,8 +59,8 @@ test/cart.test.mjs:9 'computes the total'
 
 ## `gutcheck lint`
 
-Four static checks in under a second on JavaScript/TypeScript test files (Python gets three —
-fallback collapse is JS/TS-only):
+Four static checks in under a second on JavaScript/TypeScript test files (Python gets
+three—fallback collapse is JS/TS-only):
 
 - **derivation coherence**—a comment deriving an expected value disagrees with the value the
   assertion pins.

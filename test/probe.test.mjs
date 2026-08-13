@@ -291,6 +291,20 @@ test('PROBE: a function-equivalence (memoize) test is SOUND', () => {
   finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+// Workspace (monorepo) vector — same oracle as prove.test.mjs's workspace e2e: the dep is resolvable
+// from the test's own dir in the real tree, so a resolution-preserving work copy must reach a verdict.
+test('PROBE: a workspace package whose dep lives in its OWN nested node_modules is SOUND, not INCONCLUSIVE', () => {
+  const d = project({
+    'package.json': '{"type":"module"}',
+    'packages/app/package.json': '{"name":"app","type":"module"}',
+    'packages/app/node_modules/dbl/package.json': '{"name":"dbl","type":"module","main":"index.mjs"}',
+    'packages/app/node_modules/dbl/index.mjs': 'export const dbl = (x) => x * 2;\n',
+    'packages/app/src/lib.mjs': "import { dbl } from 'dbl';\nexport function add(a, b) { return dbl(a + b) / 2; }\n",
+    'packages/app/test/t.test.mjs': `${head} import { add } from '../src/lib.mjs';\ntest('add sound',()=>{ assert.strictEqual(add(2, 3), 5); });` });
+  try { assert.equal(probe(d, { testFile: 'packages/app/test/t.test.mjs', sutFile: 'packages/app/src/lib.mjs', sutFn: 'add' }).verdict, 'SOUND'); }
+  finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 test('PROBE: INCONCLUSIVE when the unmutated test does not pass, or the fn is absent', () => {
   const d = project({ 'package.json': '{"type":"module"}', 'src/sut.mjs': SUT,
     'test/t.test.mjs': `${head}\ntest('bad',()=>{ assert.strictEqual(1,2); });` });

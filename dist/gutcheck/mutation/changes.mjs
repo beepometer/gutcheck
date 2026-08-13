@@ -285,6 +285,23 @@ export function classifyChanges(changedByFile, blockRecords) {
         changes.push({ file, fn, line, status: 'unverifiable', granularity, evidence: { reason, reasons, blocks: pick(refs) } });
         continue;
       }
+      // FILE-LEVEL reference fallback, gated to dynamic-title records: a loop-generated
+      // characterization test takes its subject from module scope (an import + a case table), so the
+      // fn's name never appears in any block BODY — the only surface the refs scan above reads — and a
+      // genuinely exercised fn would read 'untested' ("no test names it" — false; the agent-gate
+      // consumer would push for tests that already exist). A dynamic-title record carries its whole
+      // file's masked source (prove.mjs attaches fileMasked to those records only); a changed fn named
+      // there is referenced by a test the probe cannot select — 'unverifiable' states exactly that.
+      // Gated to dynamic-title so a static-titled file's bare import can never flip a true 'untested':
+      // for probeable titles, block bodies already carry what each test touches. Same bare-name ref()
+      // as the block-body scan above — 'unverifiable' is a can't-confirm claim, never a verdict, so the
+      // no-file-attribution looseness that would be unsound for proven/hollow is admissible here.
+      // Byte-identical when absent: records without fileMasked attribute nothing.
+      const dynFileRefs = blockRecords.filter((b) => b.why === 'dynamic-title' && b.fileMasked && ref(b.fileMasked, fn));
+      if (dynFileRefs.length) {
+        changes.push({ file, fn, line, status: 'unverifiable', granularity, evidence: { reason: 'dynamic-title', reasons: { 'dynamic-title': dynFileRefs.length }, blocks: pick(dynFileRefs) } });
+        continue;
+      }
       changes.push({ file, fn, line, status: 'untested', granularity, evidence: {} });
     }
   }

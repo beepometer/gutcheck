@@ -11,7 +11,7 @@
 // flags — fixture-builders, formatters, equivalence tests). The probe is the precision gate: it clears
 // those false positives (a broken SUT makes a real test fail) and confirms the genuinely hollow ones.
 import { execSync } from 'node:child_process';
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, existsSync, symlinkSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codeOnly } from '../checker/lexer.mjs';
@@ -590,6 +590,33 @@ function arrowSite(code, mask, fromAfterArrow, firstParam) {
   return { site: 'arrowExpr', start: j, end, firstParam, originalInner: code.slice(j, end), make: (v) => v };
 }
 
+// Re-link EVERY node_modules the work copy stripped, at its same relative path — not only the
+// root's. Workspace installs (pnpm/npm/yarn monorepos) put each package's deps in that package's
+// OWN nested node_modules; re-linking only the root's leaves a nested-only dep unresolvable in the
+// work copy, so every baseline in that package fails and a fully sound suite reads as
+// all-inconclusive. Walks the SOURCE tree but descends only where the work copy actually has the
+// directory — that mirrors whatever filter built the copy, with no second skip-list to drift out of
+// sync. dirent.isDirectory() is lstat-based (false for symlinks), so symlinked dirs are never
+// DESCENDED through — cycle-safe — but a node_modules that is ITSELF a symlink (a linked install;
+// this repo's own e2e fixtures) is still re-linked: the new link points at the old link's path and
+// resolution follows through. Never descends INTO an install tree (the whole dir is linked, done).
+// 'junction' needs no privileges on win32 (plain dir symlinks do). Each link is individually
+// best-effort: one that cannot be made degrades to the missing-deps behavior the callers already
+// handle (baseline fails → INCONCLUSIVE, never a crash or a wrong verdict).
+export function linkNodeModules(src, work) {
+  let entries; try { entries = readdirSync(src, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.name === 'node_modules') {
+      if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+      try { symlinkSync(join(src, e.name), join(work, e.name), process.platform === 'win32' ? 'junction' : 'dir'); } catch {}
+      continue;
+    }
+    if (!e.isDirectory()) continue;
+    const w = join(work, e.name);
+    if (existsSync(w)) linkNodeModules(join(src, e.name), w);
+  }
+}
+
 function runsGreen(dir, testCmd) {
   // Strip NODE_TEST_CONTEXT so a child `node --test` does not detect a parent test runner and self-skip
   // (which would exit 0 and be misread as "passed") — same defense as mutation/run.mjs.
@@ -608,10 +635,10 @@ export function probe(projectDir, { testFile, sutFile, sutFn, testCmd }) {
   const tmp = mkdtempSync(join(tmpdir(), 'gutcheck-probe-'));
   try {
     // Copy the tree WITHOUT node_modules/.git (copying a full install per run stalls CI on real repos),
-    // then symlink node_modules so deps still resolve. The probe only rewrites the one SUT file.
+    // then symlink every stripped node_modules back (root AND workspace-nested) so deps still resolve.
+    // The probe only rewrites the one SUT file.
     cpSync(projectDir, tmp, { recursive: true, filter: (src) => !/(^|[\\/])(node_modules|\.git)([\\/]|$)/.test(src) });
-    const nm = join(projectDir, 'node_modules');
-    if (existsSync(nm)) { try { symlinkSync(nm, join(tmp, 'node_modules'), 'dir'); } catch { /* deps unavailable → test may go INCONCLUSIVE, never crash */ } }
+    linkNodeModules(projectDir, tmp);
     const sutPath = join(tmp, sutFile);
     if (!existsSync(sutPath)) return { verdict: 'INCONCLUSIVE', why: `SUT file not found: ${sutFile}` };
     if (!runsGreen(tmp, cmd)) return { verdict: 'INCONCLUSIVE', why: 'the test does not pass unmutated (env/deps?)' };

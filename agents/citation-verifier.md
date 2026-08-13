@@ -14,7 +14,7 @@ You verify one citation at a time, deeply. You do not author specs, you do not m
 
 Apply this protocol per citation:
 
-1. **Classify the source** — concrete (local file:line, commit sha, kernel source, extracted package/binary string, datasheet PDF) vs abstract (journal article, patent, standards-body section, textbook chapter, forum / blog post).
+1. **Classify the source**—concrete (local file:line, commit sha, kernel source, extracted package/binary string, datasheet PDF) vs abstract (journal article, patent, standards-body section, textbook chapter, forum / blog post).
 
 2. **Concrete-source verification**:
    - `Read` / `grep` / `git show` the cited location.
@@ -22,12 +22,12 @@ Apply this protocol per citation:
    - If the location has changed (line numbers drift), capture the corrected ref.
    - If the cited content doesn't exist there: the citation is wrong. Drop or correct.
 
-3. **Abstract-source verification** (all four sub-checks mandatory):
+3. **Abstract-source verification** (all five sub-checks mandatory):
    - **Existence**: `WebFetch` the cited URL or run a web search to confirm the source exists with the cited title + authors.
    - **Content match**: read the source (or its accessible portion). Confirm the cited section / equation / numeric threshold actually says what the claim asserts.
    - **Applicability**: is the cited claim relevant to the repo context where it'd be applied? A real standards section may exist; if it governs a scenario the project doesn't use (a method the code never invokes, an input class it never sees), the citation is misapplied even though the section is real.
-   - **Patent assignee / journal name / edition year**: verify each independently. Patent numbers are usually right; assignees often aren't — a patent cited as belonging to the company that markets a feature is frequently assigned to a different entity (a university lab, an acquirer, or the original OEM).
-   - **Channel independence**: confirm the confirming page is the canonical / primary host (publisher of record, standards body, patent office), not an aggregator / mirror / SEO / AI-summary page. A SINGLE secondary summary's quote is not primary verification — record `provenance: secondary-summary` under **Notes** in the output, and either cross-confirm the same verbatim text from a second independent source or return `unverified-from-public-source`; never put a lone-summary quote in the verified-quote-inline format.
+   - **Patent assignee / journal name / edition year**: verify each independently. Patent numbers are usually right; assignees often aren't—a patent cited as belonging to the company that markets a feature is frequently assigned to a different entity (a university lab, an acquirer, or the original OEM).
+   - **Channel independence**: confirm the confirming page is the canonical / primary host (publisher of record, standards body, patent office), not an aggregator / mirror / SEO / AI-summary page. A SINGLE secondary summary's quote is not primary verification—record `provenance: secondary-summary` under **Notes** in the output, and either cross-confirm the same verbatim text from a second independent source or return `unverified-from-public-source`; never put a lone-summary quote in the verified-quote-inline format.
 
 4. **For paywalled / inaccessible sources**: search for public summaries that quote the cited section. If a public summary exists, capture quote + URL. If not, mark as `unverified-from-public-source` and return the source as engineering judgment with a rationale the parent can include in the artifact.
 

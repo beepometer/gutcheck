@@ -462,6 +462,34 @@ test('a probe-cap record keeps reference evidence: unverifiable (probe-cap), nev
   assert.equal(changeSummary.untested, 0);
 });
 
+// FILE-LEVEL reference fallback (field report 2026-08-13 §4): a loop-generated characterization test
+// takes its subject from module scope (an import + a case table), so the fn's name never appears in
+// any block BODY — the only surface the refs scan reads — and a genuinely exercised fn read
+// 'untested' ("no test names it" — false; the agent-gate consumer would push for tests that exist).
+// A dynamic-title record carries its file's full masked source; a changed fn named there is
+// referenced by a test the probe cannot select — 'unverifiable (dynamic-title)'.
+test('classifyChanges: a fn named only at module scope of a dynamic-title file is unverifiable, not untested', () => {
+  const changed = [{ file: 'src/a.mjs', granularity: 'hunk', decls: [{ fn: 'add', line: 1, endLine: 2 }] }];
+  const blocks = [{ file: 't/loop.test.mjs', line: 5, name: 'case ${fn.name}', bodyMasked: 'assert.strictEqual(fn(a, b), want)', verdict: 'skipped', why: 'dynamic-title',
+    fileMasked: "import { add } from '../src/a.mjs';\nconst cases = [[add, 2, 3, 5]];\nfor (const [fn, a, b, want] of cases) { test(``, () => { assert.strictEqual(fn(a, b), want); }); }" }];
+  const { changes, changeSummary } = classifyChanges(changed, blocks);
+  assert.equal(changes[0].status, 'unverifiable', JSON.stringify(changes));
+  assert.equal(changes[0].evidence.reason, 'dynamic-title');
+  assert.deepEqual(changes[0].evidence.blocks, [{ file: 't/loop.test.mjs', line: 5, name: 'case ${fn.name}' }]);
+  assert.equal(changeSummary.untested, 0);
+});
+
+// The gate: file-level references rescue ONLY dynamic-title records. For a probeable (static) title,
+// block bodies already carry what each test touches — a module-scope-only mention there (a bare
+// import, a helper table feeding nothing) stays the honest 'untested'.
+test('classifyChanges: a module-scope-only mention in a STATIC-titled file stays untested', () => {
+  const changed = [{ file: 'src/a.mjs', granularity: 'hunk', decls: [{ fn: 'add', line: 1, endLine: 2 }] }];
+  const blocks = [{ file: 't/x.test.mjs', line: 3, name: 'static', bodyMasked: 'assert.ok(helper())', verdict: 'skipped', why: 'no-pin',
+    fileMasked: "import { add } from '../src/a.mjs';\ntest('static', () => { assert.ok(helper()); });" }];
+  const { changes } = classifyChanges(changed, blocks);
+  assert.equal(changes[0].status, 'untested', JSON.stringify(changes));
+});
+
 // SAME-DIFF-ORACLE PROVENANCE (Task 7): a proven verdict stands as proven (an adversarially-authored
 // oracle is indistinguishable from a legitimate one from the outside), but the engine already knows
 // whether the binding test's FILE was itself changed in this diff — a fact, not an accusation.

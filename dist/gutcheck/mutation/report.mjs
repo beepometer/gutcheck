@@ -62,6 +62,21 @@ export function oneSidedLines(rows, style) {
   return [head(`${hi.length} bind${hi.length === 1 ? 's' : ''} only against too-high results, ${lo.length} only against too-low`)];
 }
 
+// Sibling-binding context for a hollow row: live triage needs one fact the run already computed —
+// whether ANOTHER probed test binds the same fn (an equivalence/determinism companion of a proven
+// value-pin is one-sided by design; a fn whose self-comparison is its only probed coverage is the
+// real gap). Joined against r.proven's execution evidence on the (fn, sutRel) PAIR — a bare name
+// would cross-attribute a same-named fn in an unrelated file — at zero extra probe cost. FACT-ONLY:
+// counts proofs, never renders a fix-now/by-design verdict. No survivorPairs (older or hand-built
+// results) → no note, byte-identical to before the annotation existed.
+function siblingNote(h, proven) {
+  const notes = (h.survivorPairs || []).map(({ fn, sutRel }) => {
+    const n = (proven || []).filter((p) => (p.pairs || []).some((q) => q.fn === fn && q.sutRel === sutRel)).length;
+    return n > 0 ? `${fn}() is bound by ${n} other proven test${n === 1 ? '' : 's'}` : `no other probed test binds ${fn}()`;
+  });
+  return notes.length ? `  (${notes.join('; ')})` : '';
+}
+
 // Full-suite human report (no diff scope — r.changeSummary is null). Pinned byte-for-byte by the
 // gutcheck-cli.test.mjs "byte-identical to the release format" test and mutation/gutcheck.mjs's own
 // banner()-then-formatReport() call: this function must never reference r.changeSummary/r.changes.
@@ -111,7 +126,7 @@ function formatFullScanReport(r) {
   if (r.hollow.length) {
     lines.push('');
     lines.push(`${r.hollow.length} test(s) pass even when their function is gutted — they don't actually test it:`);
-    for (const h of r.hollow) lines.push(`  ✗ ${h.file}:${h.line}  '${h.name}'  — survives gutting ${h.survivors.join(', ')}()`);
+    for (const h of r.hollow) lines.push(`  ✗ ${h.file}:${h.line}  '${h.name}'  — survives gutting ${h.survivors.join(', ')}()${siblingNote(h, r.proven)}`);
   } else if (r.scored > 0) lines.push(`✓ ${r.caught} function${r.caught === 1 ? '' : 's'} verified: gutted each, its test went red.${r.skipped.length ? ` ${r.skipped.length} test(s) skipped (see banner for reasons).` : ''}`);
   // Identity-stub advisory (--deep): per-FUNCTION ratios, not a per-test list — no-op tests pass identity
   // stubs by design (INTENTIONAL-NOOP / ACCIDENTAL-FIXED-POINT were the audit's two majority classes, and

@@ -4,6 +4,27 @@ All notable changes to Gutcheck are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-13
+
+- Workspace monorepos (pnpm/npm/yarn) now probe on the first run: the work copy re-links every
+  `node_modules` it stripped—the root's AND each package's own nested one—at its same relative
+  path. Previously only the root's was re-linked, so a dep installed into a package's nested
+  `node_modules` (pnpm's default layout) was unresolvable in the copy, every baseline failed, and
+  a fully sound suite read as all-inconclusive. A `node_modules` that is itself a symlink (linked
+  installs) is re-linked too; a link that cannot be made degrades to the existing missing-deps
+  `inconclusive`, never a wrong verdict.
+- A changed function exercised only through a dynamic-titled characterization loop (the fn's name
+  appears at module scope—an import and a case table—but in no test-block body) now classifies
+  `unverifiable (test name is computed at runtime)` instead of the false "no binding test — no test
+  names them". Gated to files containing dynamic-title blocks, so a static-titled file's bare
+  import can never mask a genuinely untested function.
+- Full-scan hollow rows carry sibling-binding context from the same run's verdicts:
+  `total() is bound by 2 other proven tests` (an equivalence companion of proven value-pins) vs
+  `no other probed test binds dup()` (the fn's only probed coverage). Zero extra probes; facts
+  only, never a fix-now/by-design verdict.
+- The `--since` full-suite fallback banner ("touched no probeable tests — scanning the full suite
+  instead") prints before the fallback scan's probe lines, not after them.
+
 ## [0.6.0] — 2026-07-29
 
 - JS/TS SUT resolution reads through the import shapes real repos actually use, each with the same
@@ -116,10 +137,10 @@ All notable changes to Gutcheck are documented here. The format follows
 
 ## [0.3.2] — 2026-07-15
 
-- The CI markdown surface (sticky PR comment, job summary) carries the probe mechanics — probed
-  functions, bound ratio, tests skipped, runner — under the verdict summary, so a reader deciding
+- The CI markdown surface (sticky PR comment, job summary) carries the probe mechanics—probed
+  functions, bound ratio, tests skipped, runner—under the verdict summary, so a reader deciding
   how much to trust the gate as coverage sees the denominator at a glance.
-- The README's verdict flow chart ships as committed light/dark SVGs — the GitHub mobile app
+- The README's verdict flow chart ships as committed light/dark SVGs—the GitHub mobile app
   renders no mermaid.
 
 ## [0.3.1] — 2026-07-15
@@ -129,7 +150,7 @@ All notable changes to Gutcheck are documented here. The format follows
 - Unverifiable reasons state only established facts: a test that pins a value the probe can't tie
   to a called function reports `pin-unresolved`, split from `no-pin`; execution-observed evidence
   outranks static reads on rollup ties (#3).
-- Every skip reason is itemized in the banner — the itemized counts always sum to the skipped
+- Every skip reason is itemized in the banner—the itemized counts always sum to the skipped
   total, and an unrecognized reason code renders verbatim instead of being dropped.
 - The full-scan headline leads with the coverage denominator ("verdicts on X of Y tests") whenever
   tests were skipped or inconclusive, so the one-line summary can never read as a whole-suite claim.
@@ -140,7 +161,7 @@ All notable changes to Gutcheck are documented here. The format follows
   refusal); a lock left by a dead process clears itself.
 - Hollow is confirmed before it is reported: a test that survives the gut is re-gutted with the
   opposite-signed sentinel, and `hollow` now means green under **both** directions. Red under
-  exactly one is **one-sided** — a new non-blocking verdict tier for threshold/comparison oracles
+  exactly one is **one-sided**—a new non-blocking verdict tier for threshold/comparison oracles
   (two complementary one-sided tests jointly bind the function). Survivors are rare, so the
   confirmation is near-free; an accusation can never be a sentinel-sign accident.
 - `--deep` extends both-sentinel evidence to the proven side (a one-direction-only proof demotes
@@ -166,7 +187,7 @@ All notable changes to Gutcheck are documented here. The format follows
 - Capped functions report "not probed (cap)", never "untested".
 - The clean-run coverage line reaches the user via the stdout JSON `systemMessage` (previously
   written to a discarded stderr channel).
-- The probe is memoized per diff-hash — unchanged diffs are not re-probed within a session.
+- The probe is memoized per diff-hash—unchanged diffs are not re-probed within a session.
 - `--time-budget=<seconds>` caps wall-clock probe time, returning honest partial results on
   slow-runner repos.
 - JVM promoted to a supported surface: Gradle (including Android/Robolectric), Maven (single- and
@@ -176,14 +197,14 @@ All notable changes to Gutcheck are documented here. The format follows
 - Block reasons and `--explain` name the survivor's file (`fn() (src/file.mjs)`); an already-failing
   test's block reason also quotes the runner's own failure text, with TAP bookkeeping filtered out.
 - Typed declarations (`const x: T = fn(...)` in TS, `val x: T = fn(...)` in Kotlin) and chai language
-  chains (`.to.be.equal(...)`) now credit — these idiomatic pins previously read as no binding test.
-- Under a probe cap, test files changed in the diff are probed first — the agent's own new tests get
+  chains (`.to.be.equal(...)`) now credit—these idiomatic pins previously read as no binding test.
+- Under a probe cap, test files changed in the diff are probed first—the agent's own new tests get
   verified before the backlog.
 - A proven function's evidence states "M via tests changed in this diff" when every binding test
   co-changed with the code (fact-only, never a verdict); capped functions count as "not probed (cap)",
   not "unverifiable".
 - Finishing a turn over a still-flagged hollow (or already-failing) test emits a non-blocking
-  `systemMessage` naming the unfixed test(s) — memo-backed, never re-probed, silent once the diff
+  `systemMessage` naming the unfixed test(s)—memo-backed, never re-probed, silent once the diff
   changes.
 - The Stop-hook gate is a CLI surface (`gutcheck gate --harness=<name>`) behind a harness-adapter
   interface, so any agent harness can call the same gate the Claude Code plugin uses.

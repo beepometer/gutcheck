@@ -2,7 +2,7 @@
 
 A protocol adapter over the shared gate (`mutation/gate.mjs`'s `cursor` harness entry, exposed as
 `gutcheck gate --harness=cursor`), wired to Cursor's own `stop` hook. Cursor's `stop` hook cannot block
-the turn the way Claude Code's or Codex's can — it can only return `{"followup_message": "..."}`, which
+the turn the way Claude Code's or Codex's can—it can only return `{"followup_message": "..."}`, which
 Cursor auto-submits as the NEXT USER message. This adapter uses that channel as a re-prompt gate: on a
 proven-hollow test (or a changed test that already fails before any mutation runs), it hands back the
 same block text Claude Code/Codex would show, phrased as an instruction, and Cursor resubmits it as if
@@ -18,32 +18,32 @@ the user had typed it.
 ## What fires when
 
 - `stop` fires whenever a Cursor agent turn ends. The gate reads `{status, loop_count}` from stdin and
-  gates ONLY `status === 'completed'` — an aborted or errored turn is not ours to re-prompt.
+  gates ONLY `status === 'completed'`—an aborted or errored turn is not ours to re-prompt.
 - On a proven-hollow test, or a changed test that already fails before any mutation runs, it prints
-  `{"followup_message": "..."}` — Cursor auto-submits that text as the next user message, continuing the
+  `{"followup_message": "..."}`—Cursor auto-submits that text as the next user message, continuing the
   turn.
 - `loop_count > 0` means Cursor already auto-submitted our own previous `followup_message` once and the
-  agent stopped again — the gate treats that exactly like Claude Code's `stop_hook_active` and allows the
+  agent stopped again—the gate treats that exactly like Claude Code's `stop_hook_active` and allows the
   stop (never forces a second retry from this signal alone).
 - Belt-and-braces: a memo-backed one-shot guard also records the block against the current diff-hash the
-  moment it fires, and refuses to block again while that diff stays unchanged — independent of
+  moment it fires, and refuses to block again while that diff stays unchanged—independent of
   `loop_count`, in case some later, unrelated stop event still carries the same unfixed diff. Cursor's own
   `loop_limit` (default 5 auto-follow-ups) is a second, coarser cap on top of both.
-- Clean runs stay silent: unlike Claude Code, there is no clean-run voice channel here — a
+- Clean runs stay silent: unlike Claude Code, there is no clean-run voice channel here—a
   `followup_message` on a clean stop would re-open the turn, which is noise, not signal. There is no
   residue channel either, for the same reason.
 
-## Coverage boundary — no session baseline
+## Coverage boundary—no session baseline
 
 Cursor has no SessionStart-equivalent hook, so nothing ever records a `<git-dir>/gutcheck-baseline` file
 on Cursor's own behalf. The gate's baseline resolution falls back to `HEAD` unless another gutcheck
 integration's SessionStart has already recorded a baseline in this repo (the baseline file lives at the
-git-dir level, shared by every harness working in it — Codex's `SessionStart` entry is the one that
+git-dir level, shared by every harness working in it—Codex's `SessionStart` entry is the one that
 writes it today). Where nothing has recorded a baseline, in practice:
 
 - **Covered:** everything currently uncommitted (staged or in the working tree) at the moment `stop`
   fires.
-- **Not covered:** anything the agent committed mid-session, before this final stop — those changes are
+- **Not covered:** anything the agent committed mid-session, before this final stop—those changes are
   already part of `HEAD` and drop out of the diff the gate probes. A long Cursor session that commits
   along the way only gets the last stop's uncommitted tail checked, not the whole session's work.
 
@@ -52,7 +52,7 @@ once, at the end), or run `gutcheck` by hand against the session's actual starti
 
 ## Loop behavior
 
-One forced follow-up per unfixed diff, maximum — the memo one-shot guard above enforces that regardless
+One forced follow-up per unfixed diff, maximum—the memo one-shot guard above enforces that regardless
 of `loop_count`. Cursor's own `loop_limit` (default 5) is a second, independent cap on auto-follow-ups.
 
 ## Opt-outs

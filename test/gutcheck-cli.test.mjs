@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, openSync, closeSync } from 'node:fs';
 import { spawnSync, execSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -725,6 +725,25 @@ test('--no-fallback suppresses the full-suite widening on an unprobeable --since
   // "0 probed" evidence now lives in the trailing mechanics footnote, not a banner() preamble.
   assert.match(without.out, /gutcheck: 0 functions in this diff/);
   assert.match(without.out, /\(probed 0 fns · 0\/0 bound · 0 skipped · runner \S+\)/);
+});
+
+// The widening banner must print BEFORE the fallback scan's own probe lines — reading top-to-bottom,
+// the probes otherwise look like in-scope work until the banner rewrites their meaning at the end.
+// stdout (banner) and stderr (progress) are pointed at the SAME file, where Node's writes are
+// synchronous on POSIX — byte order in the file IS emission order, no cross-stream pipe races.
+test('the full-suite fallback banner prints before the fallback scan probes anything', () => {
+  const d = gitProject();
+  _write(_join(d, 'notes.txt'), 'x'); // non-empty diff that touches nothing probeable
+  const log = _join(_mkdtemp(_join(_tmp(), 'gc-order-')), 'merged.log');
+  const fd = openSync(log, 'w');
+  spawnSync('node', [GUT, '--since=HEAD'], { cwd: d, stdio: ['ignore', fd, fd] });
+  closeSync(fd);
+  const out = readFileSync(log, 'utf8');
+  const banner = out.indexOf('scanning the full suite instead');
+  const probe = out.indexOf('probing #');
+  assert.ok(banner >= 0, 'the fallback fired');
+  assert.ok(probe >= 0, 'the fallback scan probed something');
+  assert.ok(banner < probe, `the banner (byte ${banner}) must precede the first probe line (byte ${probe})`);
 });
 
 // --format=markdown IS the diff report — widening it to a full-suite scan would silently throw away the

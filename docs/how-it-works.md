@@ -1,7 +1,7 @@
 # How it works
 
-Mutation testing restricted to whole-body mutants — a wrong constant return, at most two per
-function (the second confirms a would-be hollow from the opposite sign) — and one targeted test
+Mutation testing restricted to whole-body mutants—a wrong constant return, at most two per
+function (the second confirms a would-be hollow from the opposite sign)—and one targeted test
 rerun per mutant: fast enough to run on every change. Verdicts come from parsed runner summaries
 and JUnit XML, never from exit codes.
 
@@ -43,8 +43,8 @@ signals that block a done-claim.
 
 The **checker** decides by reading. It is a set of deterministic per-kind detectors, each carrying
 must-flag and must-not-flag fixtures it must satisfy before any scan runs. It reaches tests the probe
-cannot — a test whose function can't be located, a mock-heavy suite, a diff with nothing probeable —
-and at the done-claim it reports what it finds as a non-blocking advisory line. It cannot block, and
+cannot—a test whose function can't be located, a mock-heavy suite, a diff with nothing
+probeable—and at the done-claim it reports what it finds as a non-blocking advisory line. It cannot block, and
 that is deliberate: a static detector's false positive costs attention, while a blocking false
 positive costs a stuck agent session.
 
@@ -65,9 +65,9 @@ runs inline; untested is a reference scan that found nothing to cite.
 | Verdict | Meaning | How it is established |
 |---|---|---|
 | proven | a test fails when this function breaks | the function was gutted, its test was rerun, the test failed |
-| hollow | a test covers it but cannot detect it breaking | same probe, confirmed: the test passed over the gutted function AND over the opposite-signed gut — never a sign accident |
+| hollow | a test covers it but cannot detect it breaking | same probe, confirmed: the test passed over the gutted function AND over the opposite-signed gut—never a sign accident |
 | one-sided | the test binds one direction of error (a threshold-style oracle, or a relation-only assert like `a > b`); never a blocker | the test went red under exactly one of the two opposite-signed guts |
-| unverifiable | tests reference it, but the probe could not verify any of them — a limit of the probe, not proof the tests are weak | no value-pinning assertion, the function cannot be located from the test's imports, a relational-only test whose mutant survives both extreme sentinels (`relation-unbound`), or the referencing test is itself inconclusive; each test's reason is in the JSON, the dominant one in the report |
+| unverifiable | tests reference it, but the probe could not verify any of them—a limit of the probe, not proof the tests are weak | no value-pinning assertion, the function cannot be located from the test's imports, a relational-only test whose mutant survives both extreme sentinels (`relation-unbound`), or the referencing test is itself inconclusive; each test's reason is in the JSON, the dominant one in the report |
 | untested | no test mentions it | reference scan over the test files in scope |
 
 `proven` means the tests bind the function, not that the code is correct: a test can pin a wrong
@@ -75,7 +75,7 @@ value and still bind.
 
 ## Cost
 
-Cost is dominated by your own test runner's startup, not gutcheck itself — typically around a
+Cost is dominated by your own test runner's startup, not gutcheck itself—typically around a
 second per probe on fast JS runners, a few seconds on warm Gradle/Android builds. Each test run is
 bounded by a 60-second timeout, configurable with `GUTCHECK_PROBE_TIMEOUT_MS`.
 

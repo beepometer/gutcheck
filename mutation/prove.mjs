@@ -12,11 +12,11 @@
 //      helper as its oracle is not mis-flagged hollow.
 //   2. EXECUTION BASELINE — a block is probed only after its single test runs GREEN unmutated (≥1 passed,
 //      0 failed), parsed from the runner's summary, NOT its exit code (a zero-match run exits 0/green).
-import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, cpSync, rmSync, symlinkSync, realpathSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, cpSync, rmSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync, execFileSync } from 'node:child_process';
-import { grossBreak, grossBreakOpposite, hasFirstParamIdentityBranch, passthroughBreak, jsDeclSites, jvmDeclSites, locateKotlinSite } from './probe.mjs';
+import { grossBreak, grossBreakOpposite, hasFirstParamIdentityBranch, passthroughBreak, jsDeclSites, jvmDeclSites, locateKotlinSite, linkNodeModules } from './probe.mjs';
 import { sutFnsIn } from './confirm.mjs';
 import { codeOnly } from '../checker/lexer.mjs';
 import { classifyChanges, hunkNewRanges, changedDecls } from './changes.mjs';
@@ -1770,9 +1770,9 @@ export function prove(dir, opts = {}) {
     } catch (e) {
       return { runner, scored: 0, caught: 0, hollow: [], weak: [], inconclusive: [], skipped: [], outOfScope: 0, probes: 0, capped: 0, pct: null, changedFileCount, scopeError: `cannot read ${dir}: ${e && e.code || e}`, changes: null, changeSummary: null };
     }
-    const nm = join(dir, 'node_modules');
-    // 'junction' needs no privileges on Windows (plain dir symlinks do); non-win32 keeps 'dir'.
-    if (existsSync(nm)) { try { symlinkSync(nm, join(work, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir'); } catch {} }
+    // Every node_modules SKIP_DIRS stripped — the root's AND workspace-nested ones — is symlinked
+    // back at its same relative path (see linkNodeModules for the monorepo rationale).
+    linkNodeModules(dir, work);
 
     // Fail-fast on a broken env: the first ENV_ABORT_THRESHOLD blocks that reach a baseline all failing it with none passing means a broken build/wrong runner is failing every test — stop probing the guaranteed-inconclusive rest.
     const ENV_ABORT_THRESHOLD = 10;
@@ -1841,6 +1841,14 @@ export function prove(dir, opts = {}) {
       const front = []; const rear = [];
       for (const b of blocks0) (isRelOnly(b) ? rear : front).push(b);
       const blocks = [...front, ...rear];
+      // Whole-FILE masked source, attached to dynamic-title records only (classifyChanges' file-level
+      // reference fallback — see that function): a loop-generated characterization test takes its
+      // subject from module scope (import + case table), so the fn's name never appears in the block
+      // BODY the refs scan reads. Lazy + memoized: masking the full source costs nothing on the
+      // overwhelmingly common zero-dynamic-title file. JS-only by construction (parseBlocks sets
+      // dynamicTitle for template-interpolated titles; pyAst blocks never carry it).
+      let fileMasked0 = null;
+      const fileMasked = () => (fileMasked0 ??= codeOnly(code, 'typescript'));
       const ambiguous = ambiguousNames(blocks.map((b) => b.name), runner);
       // Stage 2 (only when stage 1 found anything — residualAmbiguous is a no-op-safe pure fn either way,
       // but skipping it on the common empty case avoids a wasted O(n^2) pass over every file's blocks).
@@ -1985,12 +1993,12 @@ export function prove(dir, opts = {}) {
           // report that fn 'untested' ("no test mentions it"), which is false. outOfScope++, the result
           // arrays, and every counter stay byte-identical; execution verdicts (caught/hollow) are
           // unaffected since those only ever arise from probed blocks.
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why: why0 });
+          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why: why0, ...(b.dynamicTitle ? { fileMasked: fileMasked() } : {}) });
           outOfScope++; continue;
         }
         if (b.dynamicTitle || !eligible.length) {
           skipped.push({ file: rel, line: b.line, name: b.name, why: why0 });
-          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why: why0 });
+          blockRecords.push({ file: rel, line: b.line, name: b.name, bodyMasked, ...shadowSignals, verdict: 'skipped', why: why0, ...(b.dynamicTitle ? { fileMasked: fileMasked() } : {}) });
           continue;
         }
         if (probes >= maxProbes || (timeBudgetMs && Date.now() - probeStart >= timeBudgetMs)) {

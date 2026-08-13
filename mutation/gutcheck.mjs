@@ -452,7 +452,6 @@ export function main(argv) {
   const proveOpts = { files: opts.get('files') ? opts.get('files').split(',') : undefined, runner, deep: flags.has('deep'), maxProbes: opts.get('max-probes') ? Number(opts.get('max-probes')) : 40, timeBudgetMs: opts.get('time-budget') ? Number(opts.get('time-budget')) * 1000 : undefined, onProgress };
   const since = opts.get('since');
   let r = prove(dir, { ...proveOpts, since });
-  let fallback = '';
   // A --since ref git can't resolve (prove.mjs's generic "not a git repo, or unknown ref" scopeError —
   // most commonly an unfetched remote branch, e.g. the README's own `--since origin/main` before a
   // `git fetch`) is a first-run stumble worth recovering from automatically. Only when `dir` IS a git
@@ -487,7 +486,11 @@ export function main(argv) {
     // scope and full-suite-rescan, silently discarding that hollow (the MINOR inconsistent-surfacing
     // vector: it showed in markdown/--no-fallback but vanished under the default fallback). Keep the diff
     // result when it carries a hollow.
-    fallback = `--since=${since} touched no probeable tests — scanning the full suite instead.\n`;
+    // Emitted at the widening decision, BEFORE the fallback scan runs: the scan's own progress lines
+    // otherwise read top-to-bottom as in-scope work until a trailing banner rewrites their meaning.
+    // Human format only — json/sarif/github reach this branch too but keep stdout pure (markdown is
+    // already excluded by the branch condition).
+    if (!machine) process.stdout.write(`--since=${since} touched no probeable tests — scanning the full suite instead.\n`);
     r = prove(dir, proveOpts);
   }
   // r.hollow is execution-based (a block the probe actually gutted and re-ran); r.changeSummary.hollow
@@ -500,7 +503,6 @@ export function main(argv) {
   if (format === 'github') { const g = formatGithub(r); if (g) process.stdout.write(g + '\n'); return exit(); }
   if (format === 'markdown') { process.stdout.write(formatMarkdown(r) + '\n'); return exit(); }
   if (json) { process.stdout.write(JSON.stringify(r) + '\n'); return exit(); }
-  if (fallback) process.stdout.write(fallback);
   // A diff-scoped run (r.changeSummary present, i.e. --since resolved) leads with formatReport's own
   // diff verdict and trails with its own mechanics footnote — the whole-project banner() preamble would
   // just re-bury that verdict under whole-probed-set detail, so it is skipped entirely here. A full-suite

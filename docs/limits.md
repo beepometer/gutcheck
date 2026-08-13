@@ -64,7 +64,7 @@ On a mature, mock/DI-heavy suite the probeable fraction is a structural ceiling,
 artifact: a whole-repo run that completes inside its cap and budget has reached everything the
 technique can reach, and the fraction does not grow with more compute. Observed on a large
 Android/Kotlin app: ~10% of tests verdict-able at completion. Execution-verifying that slice beats
-assuming all of it — but raising `--max-probes`/`--time-budget` past a completed run buys nothing.
+assuming all of it—but raising `--max-probes`/`--time-budget` past a completed run buys nothing.
 
 Probe cost scales with the runner: a JS/TS probe is roughly a second; a Gradle/Android probe is
 ~10–15 s even against a warm daemon. Under the Stop hook's default budget (`--max-probes=20
@@ -87,17 +87,17 @@ directions—red under exactly one is **one-sided**, a real verdict (the test bi
 of error) that never blocks. Survivors are rare, so the confirmation costs almost nothing: the
 extra run is paid exactly when an accusation is at stake. Two complementary one-sided tests, one
 per direction, jointly bind the function. A function with no opposite mutant (the string sentinel,
-a compile-failing opposite) keeps its single-sentinel verdict — no evidence, no reclassification.
+a compile-failing opposite) keeps its single-sentinel verdict—no evidence, no reclassification.
 
 `--deep` extends the same both-sentinel evidence to the proven side: a test red under only one
 direction is demoted from proven to one-sided. A plain-run `proven` on threshold logic therefore
-means the test detects the positive sentinel's direction of error — weaker evidence than a
+means the test detects the positive sentinel's direction of error—weaker evidence than a
 `proven` on an equality pin. `--deep` buys evidence quality, not coverage: it re-probes the same
 tests with more mutants (roughly double the runs) and cannot make more of the suite probeable.
 
 Relational assertions (`a > b` and friends) are probed asymmetrically: a mutant that goes red proves
 the test binds, but a mutant that survives both extreme sentinels reports `relation-unbound` instead
-of hollow — a one-sided relation like `assertTrue(score >= 0)` passes extreme sentinels by
+of hollow—a one-sided relation like `assertTrue(score >= 0)` passes extreme sentinels by
 construction, so its survival is not evidence the test is hollow.
 
 The hollow catch is the rare, high-severity case. The everyday output is the denominator: which of
@@ -113,7 +113,7 @@ the functions you just changed have no binding test at all.
 
 Gradle reruns pass `--offline` once the project has been built online. A Maven submodule built in
 isolation whose reactor siblings aren't installed to the local repo fails to build there and is
-read as no results — an under-reach, never a wrong verdict.
+read as no results—an under-reach, never a wrong verdict.
 
 **Not supported:** Kotlin Multiplatform native and JS target test sets (and `commonTest` in a
 module with no JVM target), and instrumented Android tests—`androidTest` reports `unverifiable —

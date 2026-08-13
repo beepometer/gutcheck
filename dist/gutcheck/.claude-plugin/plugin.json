@@ -1,7 +1,7 @@
 {
   "name": "gutcheck",
   "description": "Guts each changed function with a guaranteed-wrong return and reruns only that function's own tests, then reports proven, hollow, one-sided, unverifiable, or no binding test with a replayable receipt. Ships a self-testing deterministic checker that refuses to run unless it catches its own planted bugs.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": {
     "name": "the Gutcheck authors"
   },

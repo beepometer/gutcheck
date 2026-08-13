@@ -947,6 +947,32 @@ test('fmt sound', () => { assert.strictEqual(fmt(13.5), '$13.50'); });
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+// ---- workspace (monorepo) work-copy vector: pnpm/npm/yarn workspaces install each package's deps
+// into that package's OWN nested node_modules, not the root's. The work copy strips every
+// node_modules and must re-link each one it stripped — re-linking only the root's leaves a
+// nested-only dep unresolvable, so EVERY baseline in that package fails and a fully sound suite
+// reads as all-inconclusive (field report: a pnpm workspace whose vitest setup file imports a dep
+// hoisted into apps/web/node_modules — 0 verdicts). Oracle: the fixture's test passes in the real
+// tree by node's own resolution rules (the dep IS resolvable from the test's dir), so a work copy
+// that preserves resolution must reach a verdict on it — independent of how the copy is built.
+test('PROVE e2e: a workspace package whose dep lives in its OWN nested node_modules is provable, not inconclusive', () => {
+  const d = project({
+    'package.json': '{"type":"module"}',
+    'packages/app/package.json': '{"name":"app","type":"module"}',
+    'packages/app/node_modules/dbl/package.json': '{"name":"dbl","type":"module","main":"index.mjs"}',
+    'packages/app/node_modules/dbl/index.mjs': 'export const dbl = (x) => x * 2;\n',
+    'packages/app/src/lib.mjs': "import { dbl } from 'dbl';\nexport function add(a, b) { return dbl(a + b) / 2; }\n",
+    'packages/app/test/t.test.mjs': `${head} import { add } from '../src/lib.mjs';
+test('add sound', () => { assert.strictEqual(add(2, 3), 5); });
+`,
+  });
+  try {
+    const r = prove(d, { runner: 'node' });
+    assert.equal(r.inconclusive.length, 0, `no baseline failure — the nested-only dep must resolve in the work copy (got: ${JSON.stringify(r.inconclusive)})`);
+    assert.equal(r.caught, 1, 'the sound test is caught');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 // ---- node file-wrapper false-HOLLOW vector: a describe.skip'd suite never registers its inner
 // it(), so the runner selector zero-matches — but node still reports `# pass 1` for the file-
 // wrapper subtest point. Oracle: the tool's own published fail-closed contract says a test that
@@ -1533,6 +1559,61 @@ test('PROVE capped blocks keep reference evidence in changeSummary — no false 
       `a fn referenced only by a capped block must read unverifiable, not untested: ${JSON.stringify(r.changes)}`);
     assert.ok(r.changes.some((c) => c.status === 'unverifiable' && c.evidence.reason === 'probe-cap'),
       JSON.stringify(r.changes));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// ---- sibling-binding context on hollow rows (field report 2026-08-13 §6): the run itself already
+// holds the one fact hollow triage needs — whether another probed test binds the same fn. total()'s
+// self-comparison companion sits next to a proven value-pin (one-sided by design); dup()'s
+// self-comparison is its fn's ONLY probed coverage (the real gap). Same "hollow" verdict, different
+// context line, both stated from r.proven at zero extra probe cost. ----
+test('PROVE e2e: hollow rows carry sibling-binding context from the same run', () => {
+  const d = mkdtempSync(join(tmpdir(), 'gutcheck-sibling-'));
+  try {
+    writeFileSync(join(d, 'package.json'), '{"type":"module"}');
+    mkdirSync(join(d, 'src')); mkdirSync(join(d, 'test'));
+    writeFileSync(join(d, 'src/lib.mjs'),
+      'export function total(xs) { return xs.reduce((s, x) => s + x, 0); }\n' +
+      'export function dup(s) { return s + s; }\n');
+    writeFileSync(join(d, 'test/t.test.mjs'),
+      "import { test } from 'node:test'; import assert from 'node:assert';\n" +
+      "import { total, dup } from '../src/lib.mjs';\n" +
+      "test('total pins a value', () => { assert.strictEqual(total([2, 3]), 5); });\n" +
+      "test('total self-comparison', () => { const e = total([2, 3]); assert.strictEqual(total([2, 3]), e); });\n" +
+      "test('dup self-comparison', () => { const e = dup('a'); assert.strictEqual(dup('a'), e); });\n");
+    const r = prove(d, { runner: 'node' });
+    assert.equal(r.hollow.length, 2, JSON.stringify(r.hollow));
+    const rows = formatReport(r).split('\n').filter((l) => l.includes('survives gutting'));
+    assert.ok(rows.some((l) => /survives gutting total\(\).*\(total\(\) is bound by 1 other proven test\)/.test(l)), rows.join('\n'));
+    assert.ok(rows.some((l) => /survives gutting dup\(\).*\(no other probed test binds dup\(\)\)/.test(l)), rows.join('\n'));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// ---- characterization-loop shape (field report 2026-08-13 §4): the fn is imported and exercised
+// through a loop variable + case table at module scope; the test title is template-interpolated so
+// the probe can't select it. Oracle: a real test exercises the fn (delete src/a.mjs and the suite
+// goes red), so "no binding test — no test names it" is a false statement to hand the agent gate —
+// the honest classification is unverifiable ("a test exists but I can't confirm it binds"). ----
+test('PROVE diff scope: a fn exercised only through a dynamic-titled characterization loop is unverifiable (dynamic-title), not untested', () => {
+  const d = mkdtempSync(join(tmpdir(), 'gutcheck-dynfile-'));
+  try {
+    writeFileSync(join(d, 'package.json'), '{"type":"module"}');
+    mkdirSync(join(d, 'src')); mkdirSync(join(d, 'test'));
+    writeFileSync(join(d, 'src/a.mjs'), 'export function add(x, y) { return x + y; }\n');
+    writeFileSync(join(d, 'test/loop.test.mjs'),
+      "import { test } from 'node:test'; import assert from 'node:assert';\n" +
+      "import { add } from '../src/a.mjs';\n" +
+      "const cases = [[add, 2, 3, 5], [add, 1, 1, 2]];\n" +
+      "for (const [fn, a, b, want] of cases) {\n" +
+      "  test(`case ${fn.name}(${a},${b})`, () => { assert.strictEqual(fn(a, b), want); });\n" +
+      "}\n");
+    const changed = new Set([resolve(d, 'src/a.mjs')]);
+    const r = prove(d, { runner: 'node', changed });
+    const row = r.changes.find((c) => c.fn === 'add');
+    assert.ok(row, JSON.stringify(r.changes));
+    assert.equal(row.status, 'unverifiable', JSON.stringify(r.changes));
+    assert.equal(row.evidence.reason, 'dynamic-title');
+    assert.equal(r.changeSummary.untested, 0);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
