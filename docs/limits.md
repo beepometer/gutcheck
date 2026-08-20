@@ -142,12 +142,34 @@ literal" concern—the check closes uncited golden floats, not the vector.
 **`derivationCoherence`**—flags an inline arithmetic derivation comment that does not compute the
 asserted value. A sweep produced 0 findings across 9 repositories, with four distinct
 parser-mechanism causes for the misses. Variables and units are skipped by design, so only
-fully-numeric inline derivations are checked.
+fully-numeric inline derivations are checked. A clause's value must end at a clause boundary: in a
+multi-clause comment (`// ttl = 300, refreshInterval = 300-60 = 240`) a number that continues into an
+expression is that expression's start, never a clause value. **Consequence: a derivation whose value
+is immediately followed by an arithmetic operator in prose never anchors a clause** (a trailing `%`
+is read as a percent sign, not an operator), and a bare `int-int` expression still reads as a range,
+not subtraction.
+
+**`assertionConsistency`**—flags the same pure literal-arg call asserted to two different values
+within one test. Two calibrations bound it: a call whose name carries an anchored sequence/generator
+token (`idFor`, `nextToken`, `pageCounter`) is never treated as pure, and a contradiction with an
+intervening non-assertion call statement between the two assertions is not flagged (the call may
+mutate the state behind the result). **Consequence: a genuinely contradictory assertion on a
+generator-named pure function, or one separated by any setup call, is never flagged.** Contradictions
+separated only by other assertions—the copy-paste class—still flag.
 
 **`fallbackCollapse`**—flags a compare-to-empty assertion whose actual expression launders an absent
 field through a `|| []` / `?? {}` fallback. Restricted to call-derived fallbacks—a fallback over a
 static field with no call upstream is not flagged. Promoted to the lint set on a corpus sweep of 16 true
-findings and 0 false positives within that restriction.
+findings and 0 false positives within that restriction. A known judgment call inside that restriction:
+a plain default-contract assertion (`cfg.plugins ?? {}` compared to `{}`, where the test's stated
+purpose is the default itself) flags by the same rule that carries the sweep's true one-hop findings—
+statically the shapes are identical. Asserting `cfg.plugins === undefined` pins the same contract
+without the fallback.
+
+**`testShapeGuard` (time-random-leak)**—the clock-control file exemption is an enumerated list
+(MockDate, the `useFakeTimers` family, `vi`/`jest.spyOn(Date, 'now')`, `sinon.stub(Date, 'now')`).
+**Consequence: an unlisted clock-stubbing idiom still flags**; the `TIME-LEAK-OK:` line marker is the
+escape hatch.
 
 **`shadowOracleGuard`**—flags an expected value taken from a locally-defined helper that re-derives a
 number. Out of reach by design: re-running the imported system under test into a variable

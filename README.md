@@ -144,7 +144,7 @@ The report on a real diff—three changed functions, two tests, all green in CI:
 ```console
 $ npx gutcheck --since origin/main
 
-gutcheck self-check ✓ — caught its planted fake test, passed its planted real test
+gutcheck self-check ✓ — caught its planted fake test, passed its planted real tests
 gutcheck: 3 functions in this diff — 1 proven (1 via tests changed in this diff), 1 HOLLOW, 1 with no binding test.
 
 hollow — the test passes even when the function is gutted; fix the test (receipt: gutcheck --explain <file:line>) (1):

@@ -3,12 +3,16 @@
 // guttable grammar (grammar-sync tested, both directions): everything enumerated is guttable, so
 // report reach never exceeds probe reach.
 //
-// KNOWN DELTA (guttable by the probe, deliberately UNENUMERATED here): object-property function
-// EXPRESSION values (`name: function () {}` inside a top-level object literal — the `:`-bound form,
-// as opposed to the shorthand-method form `name() {}` enumerated by jsMethodDecls below). Line-
-// anchored enumeration cannot distinguish an exported API object from a nested config literal, so
-// enumerating the `: function` form would flood the report with config callbacks — precision first.
-// Pinned both ways by the known-delta test in test/changes.test.mjs.
+// KNOWN DELTAS (guttable by the probe, deliberately UNENUMERATED here), each pinned by a known-delta
+// test in test/changes.test.mjs and allowlisted in test/differential.test.mjs's corpus-wide sync check:
+//   - object-property function EXPRESSION values (`name: function () {}` inside a top-level object
+//     literal — the `:`-bound form, as opposed to the shorthand-method form `name() {}` enumerated by
+//     jsMethodDecls below). Line-anchored enumeration cannot distinguish an exported API object from
+//     a nested config literal, so enumerating the `: function` form would flood the report with
+//     config callbacks — precision first.
+//   - class-field arrows (`bump = (n) => …` as a class member). Without class-context tracking the
+//     identical text is a plain local reassignment (`handler = (e) => …;` inside a function body),
+//     and enumerating those would emit a phantom row per reassigned local — precision first, again.
 //
 // Shared blind spots (verified consistent on BOTH sides — grossBreak refuses them AND this module
 // does not enumerate them, so there is no delta; do not re-litigate):
@@ -21,7 +25,13 @@ import { codeOnly } from '../checker/lexer.mjs';
 // object-shorthand methods are handled separately by jsMethodDecls (below) — a materially different,
 // keyword-free grammar (no `function`/`const`/`=` at all), kept as its own pass so this regex and its
 // per-line loop stay untouched for every case they already handled.
-const JS_DECL = /^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\(|function\b|[A-Za-z_$][\w$]*\s*=>)/;
+// The optional TS generic on a FUNCTION declaration's name — `function f<T>(` — mirrors probe.mjs's
+// jsSigRegex G (`<[^>()]*>`, no nested `<>`/parens: shapes G refuses, grossBreak refuses too, so sync
+// holds). The `function` keyword disambiguates; the const-arrow generic form (`= <T,>(…) =>`) is NOT
+// here — the same text prefix is an old-style TS type-assertion CAST (`const el = <Foo>(bar())`,
+// no declaration at all), so that form is enumerated by jsGenericArrowDecls below, which verifies
+// the `=>` after the balanced params (adversarial-review finding, 2026-08-19).
+const JS_DECL = /^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>\s*)?\(|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\(|function\b|[A-Za-z_$][\w$]*\s*=>)/;
 
 // JS/TS class-method / object-shorthand-method declarations: `[async] [*] NAME(params) {` with none of
 // JS_DECL's keywords. Discriminated from a call site — mirrors probe.mjs's locateBareMethod (Fix B),
@@ -72,11 +82,56 @@ function jsMethodDecls(masked) {
 function jsEndLine(lines, startIdx) {
   let depth = 0, seen = false;
   for (let i = startIdx; i < lines.length; i++) {
+    // A span that never opened a block ends BEFORE the next declaration line: a semicolon-less
+    // multi-line arrow (universal in no-semi codebases) otherwise brace-walks into the NEXT braced
+    // decl, and a hunk touching only that neighbor marks this fn changed too (a phantom row).
+    if (!seen && i > startIdx && JS_DECL.test(lines[i])) return i;
     for (const ch of lines[i]) {
       if (ch === '{') { depth++; seen = true; }
       else if (ch === '}') { depth--; if (seen && depth === 0) return i + 1; }
     }
     if (!seen && /;\s*$/.test(lines[i])) return i + 1; // one-line arrow `const f = (x) => x;`
+  }
+  return lines.length;
+}
+
+// Generic const-arrows (`const first = <T,>(arr) =>`), full-mask: enumerated ONLY when `=>` follows
+// the balanced parameter list — the one shape a type-assertion cast can never produce. Guttable on
+// the probe side via jsSigRegex's `= G (` branch, so the sync invariant holds.
+function jsGenericArrowDecls(masked, lines) {
+  const out = [];
+  for (const m of masked.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?<[^>()]*>\s*\(/g)) {
+    const afterParams = balanceParen(masked, m.index + m[0].length - 1);
+    if (afterParams < 0) continue;
+    let q = afterParams;
+    while (q < masked.length && /\s/.test(masked[q])) q++;
+    if (masked[q] !== '=' || masked[q + 1] !== '>') continue; // a cast, not an arrow
+    const at = masked[m.index] === '\n' ? m.index + 1 : m.index;
+    const line = lineOf(masked, at);
+    out.push({ fn: m[1], line, endLine: jsEndLine(lines, line - 1) });
+  }
+  return out;
+}
+
+// 1-based line of an index into the mask (length-preserving, so mask lines == source lines).
+function lineOf(masked, idx) { let n = 1; for (let i = 0; i < idx; i++) if (masked[i] === '\n') n++; return n; }
+// index just past the `)` matching the `(` at parenIdx, or -1 if unbalanced.
+function balanceParen(masked, parenIdx) {
+  let depth = 0;
+  for (let k = parenIdx; k < masked.length; k++) {
+    const c = masked[k];
+    if (c === '(') depth++;
+    else if (c === ')') { depth--; if (!depth) return k + 1; }
+  }
+  return -1;
+}
+// endLine of the block opened at braceIdx (the line of its matching `}`); whole file if unbalanced.
+function endLineFromBrace(masked, braceIdx, lines) {
+  let depth = 0;
+  for (let k = braceIdx; k < masked.length; k++) {
+    const c = masked[k];
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (!depth) return lineOf(masked, k); }
   }
   return lines.length;
 }
@@ -102,15 +157,19 @@ const JAVA_NON_TYPE_WORDS = new Set([
   'return', 'throw', 'new', 'yield', 'case', 'else', 'do', 'instanceof', 'synchronized',
   'assert', 'catch', 'finally', 'try', 'while', 'for', 'if', 'switch', 'super', 'this',
 ]);
-const JAVA_DECL = /\b([A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])?)\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*(?:throws\s+[^{;]*)?\{/;
+// Head only (`TYPE NAME (`): the params are balanced programmatically (balanceParen below) and the
+// `[throws …] {` tail is checked after them — a regex params group cannot balance nested parens.
+const JAVA_DECL_HEAD = /\b([A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])?)\s+([A-Za-z_$][\w$]*)\s*\(/;
 
-// endLine: if the decl's own line opens a block (`{`), brace-balance to the matching close (jsEndLine,
-// shared with the JS path above); otherwise (a Kotlin expression body `= expr`, a bodyless Kotlin
-// class/primary-constructor, or any decl whose signature we don't chase across lines) endLine === line
-// — generous-but-safe: it can never reach into a later decl, which is all changedDecls' overlap check needs.
-function jvmEndLine(lines, i) {
-  return /\{/.test(lines[i]) ? jsEndLine(lines, i) : i + 1;
-}
+// JVM declarations are scanned over the FULL mask (like the JS method pass), not line-at-a-time:
+// a multi-line parameter list, an Allman `{` on its own line, a wrapped `throws` clause, or a Kotlin
+// `fun` whose name sits on the continuation line all straddle lines, and per-line scanning silently
+// dropped them from the report entirely (found by the 2026-08-19 differential audit — the probe guts
+// every one of these, so the "report reach never exceeds probe reach" invariant was violated in the
+// other, unstated direction: probe reach the report never showed). Kotlin's body-vs-expression split:
+// the `{`/`=` after the params decides it, looked for only on the params' CLOSING line — a bodyless
+// declaration (interface member) has neither and keeps the old endLine === line generous-but-safe
+// behavior, never a scan that could run away into a later member.
 
 export function declaredFns(code, lang) {
   const jvmGrammar = lang === 'kotlin' ? 'kotlin' : lang === 'java' ? 'java' : null;
@@ -139,19 +198,49 @@ export function declaredFns(code, lang) {
     return out;
   }
   if (jvmGrammar === 'kotlin') {
-    for (let i = 0; i < lines.length; i++) {
-      const m = KOTLIN_DECL.exec(lines[i]);
-      if (!m) continue;
-      out.push({ fn: m[1], line: i + 1, endLine: jvmEndLine(lines, i) });
+    for (const m of masked.matchAll(new RegExp(KOTLIN_DECL.source, 'g'))) {
+      const line = lineOf(masked, m.index);
+      let endLine = line; // expression body / bodyless: decl line only (generous-but-safe, as before)
+      const afterParams = balanceParen(masked, m.index + m[0].length - 1);
+      if (afterParams > 0) {
+        // The body `{` (or expression-body `=`) may sit past the params' own line: an Allman brace
+        // on the next line, or a `where`-clause line in between. Follow the signature ONLY across
+        // lines that begin with `{` or `where` — anything else (the next member, an annotation, the
+        // class close) means a bodyless declaration, which keeps endLine === line (generous-but-safe).
+        let cursor = afterParams;
+        for (let hop = 0; hop < 4; hop++) {
+          let eol = masked.indexOf('\n', cursor);
+          if (eol === -1) eol = masked.length;
+          const rest = masked.slice(cursor, eol);
+          const brace = rest.indexOf('{'), eq = rest.indexOf('=');
+          if (brace !== -1 && (eq === -1 || brace < eq)) { endLine = endLineFromBrace(masked, cursor + brace, lines); break; }
+          if (eq !== -1 || eol === masked.length) break; // expression body, or end of file
+          let nextEol = masked.indexOf('\n', eol + 1);
+          if (nextEol === -1) nextEol = masked.length;
+          const next = masked.slice(eol + 1, nextEol).trimStart();
+          if (!(next.startsWith('{') || next.startsWith('where'))) break;
+          cursor = eol + 1;
+        }
+      }
+      out.push({ fn: m[1], line, endLine });
     }
     return out;
   }
   if (jvmGrammar === 'java') {
-    for (let i = 0; i < lines.length; i++) {
-      const m = JAVA_DECL.exec(lines[i]);
-      if (!m) continue; // m[1]=TYPE, m[2]=NAME, m[3]=params
+    // Head-match then PROGRAMMATIC paren balance: a regex `[^)]*` params group cannot contain a
+    // parenthesized param annotation (`@Size(min=1)`, ubiquitous in Spring/JPA), so the whole method
+    // silently vanished from the report even though the probe guts it (adversarial-review finding).
+    for (const m of masked.matchAll(new RegExp(JAVA_DECL_HEAD.source, 'g'))) {
       if (JAVA_NON_TYPE_WORDS.has(m[1]) || JAVA_NON_TYPE_WORDS.has(m[2])) continue; // a call, not a decl
-      out.push({ fn: m[2], line: i + 1, endLine: jvmEndLine(lines, i) });
+      const afterParams = balanceParen(masked, m.index + m[0].length - 1);
+      if (afterParams < 0) continue;
+      let q = afterParams;
+      while (q < masked.length && /\s/.test(masked[q])) q++;
+      if (masked.startsWith('throws', q)) {
+        while (q < masked.length && masked[q] !== '{' && masked[q] !== ';' && masked[q] !== '}') q++;
+      }
+      if (masked[q] !== '{') continue; // abstract/interface decl or a call — not a concrete method
+      out.push({ fn: m[2], line: lineOf(masked, m.index), endLine: endLineFromBrace(masked, q, lines) });
     }
     return out;
   }
@@ -164,6 +253,7 @@ export function declaredFns(code, lang) {
     const line = masked.slice(0, md.index).split('\n').length; // 1-based
     out.push({ fn: md.name, line, endLine: jsEndLine(lines, line - 1) });
   }
+  out.push(...jsGenericArrowDecls(masked, lines));
   return out;
 }
 

@@ -161,7 +161,12 @@ export function detect(text, env) {
     // `=`/`≈` anchor anywhere in the comment — this is an un-anchored descriptive list (D's count-vs-sum
     // trap: `# 3 + 4` enumerating two qualifying values, not summing them), not a derivation to verify:
     // skip rather than misread the whole comment as one.
-    const CLAUSE = /([^=≈]*?)\s*[=≈]{1,3}\s*(-?[\d.]+)/g;
+    // A clause's VALUE must end at a clause boundary — the lookahead rejects a "value" that continues
+    // into an expression (in `ttl = 300, x = 300-60 = 240`, the `300` of `300-60` is the next clause's
+    // LHS, not a value; matching it truncated that LHS to `-60` and flagged a coherent comment).
+    // `%` is deliberately NOT in the reject class: a trailing `%` on a value is a percent sign
+    // (`= 6.0206%` — the shape the ×100/÷100 tolerance below exists for), not a modulo continuation.
+    const CLAUSE = /([^=≈]*?)\s*[=≈]{1,3}\s*(-?(?:\d+(?:\.\d+)?|\.\d+))(?![.\d]|\s*[-+*/^√])/g;
     let lastClause = null; let cm;
     while ((cm = CLAUSE.exec(comment)) !== null) lastClause = cm;
     if (!lastClause) return;

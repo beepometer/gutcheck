@@ -85,7 +85,7 @@ test('gutcheck banner reports a dynamic test title as its own skip reason', () =
   });
   try {
     const r = run([d, '--runner=node']);
-    assert.match(r.stdout, /1 skipped \(1 test title is dynamic \(template interpolation\)\)/);
+    assert.match(r.stdout, /1 skipped \(1 test title is dynamic \(interpolated or parameterized\)\)/);
     assert.equal(r.status, 0, 'a dynamic-only project has zero hollow, zero caught — not a failure');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

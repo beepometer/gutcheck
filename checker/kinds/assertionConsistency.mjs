@@ -40,8 +40,29 @@ export function detect(text, env) {
   // a call whose name signals EXTERNAL / MUTABLE state (env, file, clock, random, …) is not pure — it can
   // return different values across assertions even with identical literal args, so skip it.
   const IMPURE = /env|random|rand|now|time|current|today|read|fetch|load|query|http|file|open|input|clock|date|uuid|guid/i;
-  const seen = new Map(); // normalizedCall -> first asserted value (reset at each test boundary)
+  // Sequence/id-generator names — a call DESIGNED to return a different value each time (`idFor`,
+  // `nextToken`, `pageCounter`), demonstrated by progressive assertions in state-transition tests.
+  // Boundary-anchored (so `gridWidth`'s mid-word `id` stays checkable), and generator words other
+  // than `id` exempt only as SUFFIXES — the compound then reads as "a thing that generates"
+  // (`pageCounter`, `nextToken` via Token) — never as prefixes, where ordinary English camelCase
+  // compounds collide (`nextPrime`, `counterClockwiseAngle` are pure and stay checkable).
+  const GENERATOR = /(?:^|[_$])ids?(?=[A-Z_$0-9]|$)|(?:Id|Ids|Seq|Sequence|Counter|Nonce|Token)s?$/;
+  const seen = new Map(); // normalizedCall -> { v: first asserted value, line } (reset at each test boundary)
   const offenders = [];
+  // An intervening NON-assertion call statement between two assertions of the same call can mutate the
+  // state behind it (invalidate a cache, reseed a store) — the later assertion legitimately observes a
+  // different value. Intervening ASSERTIONS never suppress: contradictions separated only by other
+  // assertions are exactly the copy-paste-with-stale-expected class this check exists for.
+  const CALL_TOKEN = /[A-Za-z_$][\w$]*\s*\(/;
+  const mutationBetween = (from, to) => {
+    for (let k = from + 1; k < to; k++) {
+      const l = lines[k];
+      if (!CALL_TOKEN.test(l)) continue;
+      if (srcs.some((re) => re.test(l))) continue; // an assertion, not a mutation
+      return true;
+    }
+    return false;
+  };
   lines.forEach((line, i) => {
     if (boundary.test(line)) seen.clear();
     for (const re of srcs) {
@@ -51,10 +72,15 @@ export function detect(text, env) {
       let call; let value;
       if (isLiteralCall(a) && isLiteralVal(b)) { call = a; value = b; } else if (isLiteralCall(b) && isLiteralVal(a)) { call = b; value = a; } else continue;
       const fnName = call.match(/^[A-Za-z_]\w*/)[0];
-      if (localDefs.has(fnName) || IMPURE.test(fnName)) continue; // locally-defined or impure → not stable
+      if (localDefs.has(fnName) || IMPURE.test(fnName) || GENERATOR.test(fnName)) continue; // not a stable pure call
       const key = normCall(call);
       const v = normVal(value);
-      if (seen.has(key)) { if (seen.get(key) !== v) offenders.push({ line: i + 1, token: 'value-contradiction' }); } else seen.set(key, v);
+      const prev = seen.get(key);
+      if (prev === undefined) seen.set(key, { v, line: i });
+      else if (prev.v !== v) {
+        if (mutationBetween(prev.line, i)) seen.set(key, { v, line: i }); // state changed — track the new value
+        else offenders.push({ line: i + 1, token: 'value-contradiction' });
+      } else seen.set(key, { v, line: i }); // same value — advance the anchor for the between-scan
       break;
     }
   });

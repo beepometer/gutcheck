@@ -3137,3 +3137,54 @@ test('pins', () => { assert.strictEqual(add(2, 3), 5); });
     assert.match(formatReport(r), /^gutcheck: warning: no non-test source files/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+
+// ---- parameterized .each/.for blocks (2026-08-19 audit #6): the title is runtime-expanded from the
+// table, so the block is discovered as DYNAMIC-titled — skipped honestly (why: dynamic-title), and a
+// fn covered only by such tests reads 'unverifiable', never the false 'untested' ("no test mentions
+// it" would push the agent to write tests that already exist). ----
+
+test('parseBlocks: it.each/test.for parameterized blocks are discovered as dynamic-titled', () => {
+  const code = [
+    "it.each([[1, 2, 3], [2, 3, 5]])('adds %i + %i', (a, b, want) => { assert.strictEqual(add(a, b), want); });",
+    "test.for([1, 2])('doubles %i', (n) => { assert.strictEqual(dbl(n), n * 2); });",
+    "it.only.each([[1]])('picked %i', (n) => { check(n); });",
+    'it.each`',
+    '  a    | b',
+    '  ${1} | ${2}',
+    "`('row $a', ({ a, b }) => { assert.strictEqual(add(a, b), 3); });",
+    "it('static', () => { assert.ok(plain()); });",
+    'const s = "it.each([1])(\'fake %i\', (x) => { f(x); });";',
+  ].join('\n');
+  const blocks = parseBlocks(code, 'js');
+  const byName = Object.fromEntries(blocks.map((b) => [b.name, b]));
+  assert.ok(byName['adds %i + %i'], `array-table .each discovered: ${JSON.stringify(Object.keys(byName))}`);
+  assert.equal(byName['adds %i + %i'].dynamicTitle, true);
+  assert.match(byName['adds %i + %i'].body, /add\(a, b\)/, 'the callback body is captured (feeds the refs scan)');
+  assert.equal(byName['doubles %i'] && byName['doubles %i'].dynamicTitle, true, 'vitest .for');
+  assert.equal(byName['picked %i'] && byName['picked %i'].dynamicTitle, true, 'modifier chain it.only.each');
+  assert.equal(byName['row $a'] && byName['row $a'].dynamicTitle, true, 'tagged-template table form');
+  assert.equal(byName['static'].dynamicTitle, false, 'plain blocks are untouched');
+  assert.ok(!byName['fake %i'], 'an .each inside a string literal is a phantom, never a block');
+});
+
+test('PROVE diff scope: a fn covered only by an it.each table is unverifiable (dynamic-title), not untested', () => {
+  const d = mkdtempSync(join(tmpdir(), 'gutcheck-eachfile-'));
+  try {
+    writeFileSync(join(d, 'package.json'), '{"type":"module"}');
+    mkdirSync(join(d, 'src')); mkdirSync(join(d, 'test'));
+    writeFileSync(join(d, 'src/a.mjs'), 'export function add(x, y) { return x + y; }\n');
+    // a runnable it.each shim so the fixture is a REAL node:test file with the canonical .each surface
+    writeFileSync(join(d, 'test/each.test.mjs'),
+      "import { test } from 'node:test'; import assert from 'node:assert';\n" +
+      "import { add } from '../src/a.mjs';\n" +
+      'const it = { each: (rows) => (title, fn) => { for (const row of rows) test(title, () => fn(...row)); } };\n' +
+      "it.each([[2, 3, 5], [1, 1, 2]])('adds %i + %i', (a, b, want) => { assert.strictEqual(add(a, b), want); });\n");
+    const changed = new Set([resolve(d, 'src/a.mjs')]);
+    const r = prove(d, { runner: 'node', changed });
+    const row = r.changes.find((c) => c.fn === 'add');
+    assert.ok(row, JSON.stringify(r.changes));
+    assert.equal(row.status, 'unverifiable', JSON.stringify(r.changes));
+    assert.equal(row.evidence.reason, 'dynamic-title');
+    assert.equal(r.changeSummary.untested, 0);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});

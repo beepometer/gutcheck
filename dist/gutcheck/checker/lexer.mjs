@@ -129,6 +129,18 @@ export function stripComments(source, lang, opts = {}) {
 
   const matchAt = (tok, at) => s.startsWith(tok, at);
 
+  // A `#!` shebang at byte 0 is not code in any of these languages (the runtime strips it). Blank the
+  // whole first line unconditionally: for js/ts it would otherwise lex as live text, and the regex-vs-
+  // division heuristic would read `/usr/` in `#!/usr/bin/env node` as a regex literal (found by the
+  // differential oracle). Python/shell reach the same result via their `#` line comment; doing it here
+  // keeps all grammars byte-identical on the one shape they share. keepComments keeps it, like any comment.
+  if (s.startsWith('#!') && !keepComments) {
+    let nl = s.indexOf('\n');
+    if (nl === -1) nl = s.length;
+    blank(0, nl);
+    i = nl;
+  }
+
   while (i < s.length) {
     const c = s[i];
 
@@ -226,9 +238,21 @@ export function stripComments(source, lang, opts = {}) {
     // 6) JS regex literal vs division
     if (g.regex && c === '/') {
       // not // or /* (those handled above), decide regex vs division
-      const regexAllowed = prevSig === undefined
+      // A POSTFIX `++`/`--` completes its expression, so a following `/` is DIVISION (`count-- /
+      // total`) — but prevSig is the bare `+`/`-`, which reads as "regex allowed". Look back over the
+      // emitted mask: two CONTIGUOUS identical +/- preceded by an expression ender is postfix inc/dec
+      // (`a - -b` stays a regex context: its two minuses are separated).
+      const postfixIncDec = (prevSig === '-' || prevSig === '+') && (() => {
+        let k = out.length - 1;
+        while (k >= 0 && /\s/.test(out[k])) k--;
+        if (k < 1 || out[k] !== prevSig || out[k - 1] !== prevSig) return false;
+        let j = k - 2;
+        while (j >= 0 && /\s/.test(out[j])) j--;
+        return j >= 0 && isExprEnder(out[j]);
+      })();
+      const regexAllowed = !postfixIncDec && (prevSig === undefined
         || (prevWord && KEYWORDS_BEFORE_REGEX.has(prevWord))
-        || !isExprEnder(prevSig);
+        || !isExprEnder(prevSig));
       if (regexAllowed) {
         const end = consumeRegex(s, i);
         if (end > i) {

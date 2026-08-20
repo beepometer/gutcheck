@@ -68,6 +68,55 @@ test('grossBreak: bare single-param and async arrows are recognized', () => {
   assert.match(grossBreak('export const compute = n => n * 2;', 'compute') || '', /987654321/);
   assert.match(grossBreak('const f = async x => x + 1;', 'f') || '', /987654321/);
 });
+// A PRETTIER-WRAPPED expression arrow — the body continues across newlines with no enclosing bracket —
+// must be gutted WHOLE. Ending the span at the first depth-0 newline replaces only the first line, a
+// PARTIAL gut with two live false-verdict vectors (both reproduced end-to-end on 2026-08-19): a wrapped
+// ternary keeps its branches, so both sentinels (truthy) still return the asserted branch and a sound
+// single-branch test reads FALSE HOLLOW; a wrapped method chain strands its tail (`987654321\n.trim()`
+// → TypeError), so every test "catches" the crash and a planted tautology reads FALSE PROVEN. Same
+// class kotlinExprSite already fixed via kotlinLineContinues (Bug A) — the JS twin assumed arrows never
+// line-continue, which Prettier disproves on any expression past printWidth.
+test('grossBreak: a multi-line ternary expression arrow is gutted whole (leading ?/: continuation)', () => {
+  const out = grossBreak("export const label = (n) =>\n  n > 0\n    ? 'pos'\n    : 'neg';\n", 'label') || '';
+  assert.match(out, /987654321/);
+  assert.doesNotMatch(out, /'pos'/, 'a surviving branch is the false-HOLLOW vector');
+  assert.doesNotMatch(out, /'neg'/);
+});
+test('grossBreak: a multi-line chained expression arrow is gutted whole (leading . continuation)', () => {
+  const out = grossBreak("export const slug = (s) =>\n  s.toLowerCase()\n    .trim()\n    .replace(/\\s+/g, '-');\n", 'slug') || '';
+  assert.match(out, /987654321/);
+  assert.doesNotMatch(out, /\.trim\(\)/, 'a stranded chain tail crashes the mutant — the false-PROVEN vector');
+  assert.doesNotMatch(out, /\.replace/);
+});
+test('grossBreak: trailing-operator line breaks (&&, +, =>) do not end a multi-line arrow expression', () => {
+  const and = grossBreak('export const ok = (x) =>\n  x > 0 &&\n  x < 10;\n', 'ok') || '';
+  assert.match(and, /987654321/);
+  assert.doesNotMatch(and, /x < 10/);
+  const plus = grossBreak('export const total = (a, b) =>\n  a +\n  b;\n', 'total') || '';
+  assert.match(plus, /987654321;/);
+  assert.doesNotMatch(plus, /\ba \+/);
+  const curried = grossBreak('export const compose = (f) => (g) =>\n  (x) => f(g(x));\n', 'compose') || '';
+  assert.match(curried, /987654321/);
+  assert.doesNotMatch(curried, /f\(g\(x\)\)/);
+});
+// Found by the differential oracle on this repo's own prove.mjs (isTestPath): operator-FIRST wrapping
+// (`\n  || (...)`) is as common as Prettier's operator-last style, and a leading `||`/`&&` line was
+// still read as the end of the expression — the same partial-gut false-verdict class.
+test('grossBreak: leading-operator line breaks (||, &&, *) do not end a multi-line arrow expression', () => {
+  const or = grossBreak('export const isTest = (f) =>\n  /\\.test\\./.test(f)\n  || /\\.spec\\./.test(f)\n  || f.includes("__tests__");\n', 'isTest') || '';
+  assert.match(or, /987654321/);
+  assert.doesNotMatch(or, /spec/, 'a stranded || tail keeps the original branches alive — the partial-gut class');
+  assert.doesNotMatch(or, /__tests__/);
+  const mul = grossBreak('export const area = (w, h) =>\n  w\n  * h;\n', 'area') || '';
+  assert.match(mul, /987654321/);
+  assert.doesNotMatch(mul, /\*\s*h/);
+});
+test('grossBreak: an ASI-terminated arrow expression still ends at its newline (no over-run into the next decl)', () => {
+  const out = grossBreak('export const inc = (x) =>\n  x + 1\nexport function g(){ return 2; }\n', 'inc') || '';
+  assert.match(out, /987654321/);
+  assert.doesNotMatch(out, /x \+ 1/);
+  assert.match(out, /export function g\(\)\{ return 2; \}/, 'the following declaration is untouched');
+});
 test('grossBreak: gutts only the named function in a multi-function file', () => {
   const code = 'export function a(){ return 1; }\nexport function b(){ return 2; }\n';
   const out = grossBreak(code, 'b');

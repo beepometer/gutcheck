@@ -18,6 +18,20 @@ test('stripComments default (2-arg) is unchanged — keeps string contents verba
   assert.ok(stripComments(src, 'javascript').includes('"x >= y"'), 'strings still verbatim by default');
 });
 
+// Found by the differential oracle: a `#!` shebang line is not code — node strips it — but the JS/TS
+// grammars lexed it as live text, and the regex-vs-division heuristic then read `/usr/` as a regex
+// literal (blanking it) while `#!`, `bin`, and `env node` stayed live for every downstream scan. The
+// whole line must blank, like a comment.
+test('codeOnly blanks a shebang line whole (js/ts)', () => {
+  const src = '#!/usr/bin/env node\nconst a = 1;\n';
+  for (const g of ['javascript', 'typescript']) {
+    const out = codeOnly(src, g);
+    assert.equal(out.length, src.length, 'length preserved');
+    assert.equal(out.slice(0, 19).trim(), '', `${g}: the shebang line is fully blanked`);
+    assert.ok(out.includes('const a = 1;'), `${g}: code after the shebang is intact`);
+  }
+});
+
 // KNOWN GAP, DELIBERATELY UNFIXED (pin, not a bug report): the regex-vs-division heuristic treats a `)`
 // as an expression-ender, so a regex literal in legal STATEMENT position right after a `)` — the idiomatic
 // `if (cond) /re/.test(x)` — is misread as division. The first quote inside the regex then opens a phantom
@@ -36,4 +50,15 @@ test('codeOnly misreads a statement-position regex after `)` as division (KNOWN,
   // pin the fail-closed consequence: grossBreak can't balance braces on the corrupted mask → null (no verdict)
   assert.equal(grossBreak(src, 'classify', 'javascript'), null,
     'mask corruption must stay fail-closed (null/inconclusive), never mint a wrong verdict');
+});
+
+// Found by the lint audit: after a POSTFIX `--`/`++` the expression is complete, so a following `/`
+// is DIVISION — but prevSig was the bare `-`/`+`, not an expression ender, and the heuristic opened a
+// phantom regex literal that swallowed the real line-comment (and with it, real code on the line).
+test('codeOnly reads a / after postfix -- or ++ as division, not a regex opener', () => {
+  const src = 'return count-- / total; // note\nconst next = hits++ / 2; // note\n';
+  const out = codeOnly(src, 'javascript');
+  assert.ok(out.includes('count-- / total;'), 'postfix -- division survives');
+  assert.ok(out.includes('hits++ / 2;'), 'postfix ++ division survives');
+  assert.ok(!out.includes('note'), 'both line comments are blanked');
 });

@@ -404,8 +404,9 @@ function kotlinLineContinues(mask, nlIdx) {
 
 // Kotlin expression-bodied `fun f(...) = expr`: the body is `expr` itself, spanning to the first top-level
 // `;`/newline that does NOT continue the expression (bracket-depth-aware, exactly like arrowSite's
-// expression span below, plus kotlinLineContinues — see above — for the line-continuation cases a JS
-// arrow expression never has). Deliberately does NOT special-case a `{` the way arrowSite does for a JS
+// expression span below, plus kotlinLineContinues — see above; arrowSite needs the same treatment via
+// jsLineContinues, since a Prettier-wrapped JS arrow expression line-continues exactly the same way).
+// Deliberately does NOT special-case a `{` the way arrowSite does for a JS
 // block-bodied arrow: in Kotlin, `= { ... }` is NEVER a block body (a Kotlin block body is always written
 // directly after the signature with no `=` at all) — a `{` appearing here is a lambda LITERAL, i.e. a
 // value, so the depth counter simply walks over its `{`…`}` as one more balanced group and the whole
@@ -576,6 +577,45 @@ function blockSite(code, mask, openBrace, firstParam) {
     make: (v) => ' return ' + v + '; ' };
 }
 
+// JS expression continuation across a depth-0 newline — the arrowSite twin of kotlinLineContinues above
+// (same structure, same conservatism: an unrecognized shape ends the expression exactly as before, never
+// a guess TOWARD continuing). Without this, a Prettier-wrapped expression arrow (wrapped ternary, `&&`
+// chain, method chain past printWidth) is gutted PARTIALLY — only its first line — which produced both a
+// live false HOLLOW (wrapped ternary: sentinels are truthy, the asserted branch still returns) and a live
+// false PROVEN (wrapped chain: `987654321\n.trim()` throws, the crash is mistaken for a discriminating
+// oracle). JS-specific cues vs the Kotlin list:
+//   (a) forward — `.` (chain), `?` (ternary branch or `?.` optional chain), `:` (ternary else; an
+//       object-literal `:` can only sit at depth>0 here, so a depth-0 leading `:` is unambiguous),
+//       and the operator-FIRST wrapping style (found live on this repo's own isTestPath): a leading
+//       symbol that can never START a JS statement — `*` `%` `^` `|` `&` `<` `>` (so `||`/`&&` come
+//       free via their first char), plus `!`/`=` only when followed by `=` (a bare `!`/`=` CAN open a
+//       statement; `!=`/`==`/`===` cannot). Leading `+` `-` `/` stay expression-ENDERS: each is a
+//       legal statement start (unary plus/minus, a regex literal), so continuing on them would risk
+//       swallowing the next statement.
+//   (b) backward — the symbol operators that can never legally end a JS expression statement, plus `=>`
+//       (a curried arrow / body on the next line) and `=` (an assignment awaiting its RHS). Word
+//       operators (`instanceof`, `in`, `typeof`) are deliberately skipped, like Kotlin's named infix.
+const JS_TRAILING_OPS = ['===', '!==', '**', '=>', '<=', '>=', '==', '!=', '&&', '||', '??', '+', '-', '*', '/', '%', '<', '>', '&', '|', '^', '?', ':', '.', '='];
+function jsLineContinues(mask, nlIdx) {
+  let q = nlIdx + 1;
+  while (q < mask.length && /\s/.test(mask[q])) q++;
+  if (mask[q] === '.' || mask[q] === '?' || mask[q] === ':') return true; // chain / ternary / optional chain
+  if (/[*%^|&<>]/.test(mask[q] || '')) return true; // operator-first wrap: none of these can start a statement
+  if ((mask[q] === '!' || mask[q] === '=') && mask[q + 1] === '=') return true; // leading !=/==/=== comparison
+
+  let p = nlIdx - 1;
+  while (p >= 0 && (mask[p] === ' ' || mask[p] === '\t' || mask[p] === '\r')) p--;
+  if (p < 0 || mask[p] === '\n') return false; // blank line before the break — nothing to be unfinished
+  for (const op of JS_TRAILING_OPS) {
+    const from = p - op.length + 1;
+    if (from < 0 || mask.slice(from, p + 1) !== op) continue;
+    const before = mask[from - 1];
+    if (before !== undefined && /[+\-*/%<>=!&|~^:.?]/.test(before)) continue; // tail of a longer/different token (`++`, `--`, `+=`)
+    return true;
+  }
+  return false;
+}
+
 function arrowSite(code, mask, fromAfterArrow, firstParam) {
   let j = fromAfterArrow;
   while (j < code.length && /\s/.test(code[j])) j++;
@@ -585,7 +625,11 @@ function arrowSite(code, mask, fromAfterArrow, firstParam) {
     const c = mask[end];
     if (c === '(' || c === '[' || c === '{') depth++;
     else if (c === ')' || c === ']' || c === '}') { if (depth === 0) break; depth--; }
-    else if (depth === 0 && (c === ';' || c === ',' || c === '\n')) break;
+    else if (depth === 0 && (c === ';' || c === ',')) break;
+    else if (depth === 0 && c === '\n') {
+      if (jsLineContinues(mask, end)) continue; // wrapped ternary/chain/operator — not the end (see above)
+      break;
+    }
   }
   return { site: 'arrowExpr', start: j, end, firstParam, originalInner: code.slice(j, end), make: (v) => v };
 }

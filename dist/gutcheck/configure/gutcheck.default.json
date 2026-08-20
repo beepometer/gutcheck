@@ -99,7 +99,7 @@
               "id": "time-random-leak",
               "patternSrc": "^(?=.*\\.(?:toBe|toEqual|toStrictEqual|toBeCloseTo)\\()(?=.*(?:Math\\.random|Date\\.now)\\s*\\()",
               "exemptSrc": "TIME-LEAK-OK:",
-              "fileExemptSrc": "MockDate|useFakeTimers|sinon\\.useFakeTimers|jest\\.useFakeTimers|vi\\.useFakeTimers"
+              "fileExemptSrc": "MockDate|useFakeTimers|sinon\\.useFakeTimers|jest\\.useFakeTimers|vi\\.useFakeTimers|(?:vi|jest)\\.spyOn\\(\\s*Date\\s*,\\s*['\"]now['\"]\\s*\\)|sinon\\.stub\\(\\s*Date\\s*,\\s*['\"]now['\"]\\s*\\)"
             }
           ]
         },
@@ -120,7 +120,8 @@
             "const r = seededRandom(42);",
             "valid: ['2100-08-04', new Date(Date.now() + 86400000).toString()]",
             "str += String.fromCharCode(Math.random() * 26 | 97);",
-            "expect(math.isPrime(new Date())).toThrow()"
+            "expect(math.isPrime(new Date())).toThrow()",
+            "vi.spyOn(Date, 'now').mockReturnValue(1700000000000);\nexpect(Date.now()).toBe(1700000000000);"
           ]
         }
       },
@@ -216,7 +217,8 @@
             "expect(n).toBe(42);",
             "expect(gain).toBeCloseTo(6.0206); // 20 * 0.30103 = 6.0206",
             "assert.strictEqual(area(5), 78.54); // 3.14159 * 5 * 5 = 78.54",
-            "assert.strictEqual(roundTo(x, 2), 78.54); // 3.14159 * 5 * 5 = 78.54"
+            "assert.strictEqual(roundTo(x, 2), 78.54); // 3.14159 * 5 * 5 = 78.54",
+            "expect(refreshIntervalFor(300)).toBe(240); // ttl = 300, refreshInterval = 300-60 = 240"
           ]
         }
       },
@@ -237,7 +239,8 @@
           "mustNotFlag": [
             "expect(factorial(5)).toBe(120);\nexpect(factorial(5)).toBe(120.0);",
             "expect(factorial(5)).toBe(120);\nexpect(factorial(6)).toBe(720);",
-            "expect(factorial(n)).toBe(120);\nexpect(factorial(n)).toBe(121);"
+            "expect(factorial(n)).toBe(120);\nexpect(factorial(n)).toBe(121);",
+            "expect(idFor('session')).toBe(1);\nexpect(idFor('session')).toBe(2);"
           ]
         }
       },

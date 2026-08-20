@@ -54,8 +54,10 @@ contributes is evidence you can ignore.
 ## The self-check
 
 Before reporting anything, gutcheck runs a self-check in a scratch directory: it plants one fake
-test and one real test, and refuses to run unless it catches the fake and clears the real one. It
-adds a fraction of a second; `--no-self-check` skips it.
+test and two real tests, and refuses to run unless it catches the fake and clears both real ones.
+The planted functions cover the shapes that have actually produced wrong verdicts, not just the
+happy path—one is a Prettier-wrapped multi-line arrow, so a partial-gut regression fails this gate
+instead of shipping verdicts. It adds about half a second; `--no-self-check` skips it.
 
 ## The five verdicts
 

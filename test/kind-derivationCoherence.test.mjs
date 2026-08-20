@@ -89,3 +89,28 @@ test('regression: the R3 planted mismatch (single-operator-class comment) still 
   assert.equal(detect('expect(area(5)).toBe(80.0); // 3.14159 * 5 * 5 = 78.54', jsEnv).length, 1);
   assert.equal(detect('assert area == 80.0  # 3.14159 * 5 * 5 = 78.54', pyEnv).length, 1);
 });
+
+// FP repro (2026-08-19 lint audit): an earlier NAMED `label = value` clause consumed the digits that
+// begin the real derivation's left side (`ttl = 300` ate the `300` of `300-60`), truncating the last
+// clause's LHS to `-60` — a valid unary-minus atom, so the check computed -60 ≠ 240 and flagged a
+// fully coherent comment. A clause's VALUE must end at a clause boundary, never mid-expression.
+test('does NOT flag a two-clause comment where a named label precedes the real derivation', () => {
+  const src = 'assert.strictEqual(refreshIntervalFor(300), 240); // ttl = 300, refreshInterval = 300-60 = 240';
+  assert.equal(detect(src, jsEnv).length, 0);
+});
+test('still flags a genuinely wrong derivation behind a leading label clause', () => {
+  // (`100*3`, not `300-60` — a bare int-int expression hits the pre-existing RANGE skip.)
+  const src = 'assert.strictEqual(totalFor(100), 250); // base = 100, total = 100*3 = 300';
+  assert.equal(detect(src, jsEnv).length, 1, 'the last clause computes 300, the assertion expects 250');
+});
+
+// Review finding (2026-08-19): `%` sat in the value-boundary reject class alongside real operators,
+// so a percent-suffixed derivation (`= 6.0206%` — an extremely common form, and the exact shape the
+// check's own ×100/÷100 percentage tolerance exists for) never matched a clause at all and the whole
+// line went unchecked. A trailing `%` is a percent sign, not a modulo continuation.
+test('a percent-suffixed derivation still anchors a clause: mismatches flag, coherent percentages stay quiet', () => {
+  const bad = 'assert.strictEqual(gainFor(20), 70); // 20 * 0.30103 = 6.0206%';
+  assert.equal(detect(bad, jsEnv).length, 1, '70 is nowhere near 6.02 — must flag');
+  const ok = 'assert.strictEqual(rateFor(130), 65); // 130/200 = 65%';
+  assert.equal(detect(ok, jsEnv).length, 0, 'the x100 percentage tolerance accepts 0.65 vs 65');
+});

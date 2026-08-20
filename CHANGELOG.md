@@ -2,7 +2,80 @@
 
 All notable changes to Gutcheck are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the major version is 0, minor
+releases are the release train (unbounded—0.9, 0.10, 0.11, …) and may change observable behavior;
+1.0 is reserved for the day the verdict contract, JSON shape, and CLI surface are declared frozen.
+
+## [0.8.0] — 2026-08-20
+
+- Parameterized test blocks—`it.each`/`test.each` (array-table and tagged-template-table forms,
+  modifier chains like `it.only.each`) and vitest's `.for`—are now discovered as dynamic-titled
+  blocks: the title is runtime-expanded from the table, so the probe never feeds one to a runner as a
+  selector, but a changed function covered only by such tests now reads
+  `unverifiable (test name is computed at runtime)` instead of the false `untested` ("no test
+  mentions it"—which pushed agents to write tests that already exist). Any shape the scanner cannot
+  parse cleanly falls closed to not-discovered, exactly the previous behavior. The skip-reason banner
+  now reads "test title is dynamic (interpolated or parameterized)".
+- Four lint false-positive classes on legitimate test code, each found by an adversarial audit and
+  now pinned by the floor config's own selfTest: a multi-clause derivation comment whose leading
+  label ate the real clause's digits (`// ttl = 300, refreshInterval = 300-60 = 240` flagged a
+  coherent comment—clause values now end at clause boundaries); progressive assertions on a
+  sequence/generator-named call (`idFor`, `pageCounter`—an anchored name rule, so `gridWidth`
+  stays checkable) and contradictions with an intervening mutation call between them
+  (invalidate-then-reseed) no longer read as contradictions; `vi`/`jest.spyOn(Date, 'now')` and
+  `sinon.stub(Date, 'now')` now exempt the time-leak rule like the `useFakeTimers` family; a `/`
+  after a postfix `++`/`--` lexes as division, not a regex opener that swallowed the rest of the
+  line. A fifth reported case—the plain default-contract fallback (`cfg.plugins ?? {}` vs `{}`)—
+  stays flagged deliberately: it is statically identical to the corpus sweep's measured-true one-hop
+  findings, and relaxing it needs corpus evidence, not a constructed counterexample (documented in
+  docs/limits.md).
+- The diff report's function enumeration now keeps up with everything the probe can already gut—
+  each of these was a silent denominator hole (a changed function with no row at all, not even
+  "no binding test"): TS generic function declarations (`function identity<T>(…)`) and generic
+  const-arrows (`const first = <T,>(…) =>`, enumerated only when `=>` follows the balanced params so
+  an old-style type-assertion cast `const el = <Foo>(bar())` can never mint a phantom row); Java
+  methods with multi-line signatures, Allman braces, wrapped `throws` clauses, or parenthesized
+  param annotations (`@Size(min=1)`); Kotlin `fun` with the name on a continuation line. Kotlin/Java
+  spans now reach the real body close (multi-line signatures, Allman braces, `where`-clause lines),
+  so body-only hunks mark the function changed; a bodyless interface member still ends on its own
+  line. A semicolon-less multi-line arrow (universal in no-semi codebases) no longer brace-walks
+  into the next declaration, so a hunk touching only the neighbor no longer marks the arrow changed.
+- The differential suite grew a grammar-sync leg: on every corpus file, everything the report
+  enumerates must be guttable and everything guttable must be enumerated (documented known-delta
+  forms and nested functions excepted), plus a Kotlin/Java direction-a pass over the fixture
+  projects. Class-field arrows joined the documented known-delta list (the identical text is a plain
+  local reassignment inside a function body—enumerating it would emit phantom rows).
+- A differential oracle now runs in the test suite (devDependency only—nothing ships): every named
+  function in the repo's own files plus a curated shape corpus is gutted and the mutant checked
+  against a real parser (@babel/parser)—the mutant must parse, the target's body must be nothing but
+  the sentinel, and the edit must stay inside the target's body; separately, `codeOnly`'s mask is
+  compared position-by-position against the parser's comment/string/template/regex ranges in both
+  directions (blanked real code, leaked literal content). 98 files, 503 guts verified, ~2s. On its
+  first run it caught the two fixes below on this repo's own source.
+- Operator-first wrapped arrow expressions (`\n  || /b/.test(f)`—the style of prove.mjs's own
+  `isTestPath`) now gut whole: a leading symbol that can never start a JS statement (`*` `%` `^` `|`
+  `&` `<` `>`, and `!=`/`==` comparisons) continues the expression across the line break, closing the
+  operator-first half of the partial-gut class fixed below. Leading `+` `-` `/` still end the
+  expression—each is a legal statement start, so continuing on them could swallow a neighbor.
+- A `#!` shebang line is blanked whole by the masking lexer, like a comment: it previously lexed as
+  live text and the regex-vs-division heuristic read `/usr/` in `#!/usr/bin/env node` as a regex
+  literal, leaving stray tokens visible to downstream scans.
+- The startup self-check now plants the shapes that have actually produced wrong verdicts, not just
+  the single-line happy path: alongside the block-bodied pair it guts a Prettier-wrapped ternary
+  arrow (a partial-gut regression would read the sound test hollow) and runs a tautology over a
+  wrapped method chain (a partial gut would strand the chain tail, crash, and read the fake test as
+  real). A probe regressing on either shape now refuses to run instead of shipping verdicts; the
+  failure detail names the exact planted test. Verified against the pre-fix probe: the enriched
+  gate fails closed on both shapes. Cost on a warm box: ~0.57s vs ~0.46s before (hyperfine, 5 runs).
+- A Prettier-wrapped expression arrow—the ternary, chain, or operator body continuing on following
+  lines with no enclosing bracket—is now gutted whole. The body span previously ended at the first
+  top-level newline, a partial gut with two wrong-verdict vectors, both reproduced end-to-end: a
+  wrapped ternary kept its branches (the sentinel condition is truthy, so the asserted branch still
+  returns) and a sound single-branch test read hollow; a wrapped method chain stranded its tail
+  (`987654321\n.trim()` throws) so the crash read as a catch and a self-echo test read proven. The
+  span now honors JS line continuations—a leading `.`/`?`/`:` or a trailing operator (`&&`, `+`,
+  `=>`, `=`, and kin)—mirroring the Kotlin expression-body fix; an unrecognized shape still ends
+  the expression exactly as before, never a guess toward swallowing a following statement.
 
 ## [0.7.0] — 2026-08-13
 

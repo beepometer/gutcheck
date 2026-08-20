@@ -1,6 +1,6 @@
 {
   "name": "gutcheck",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Diff-scoped mutation probe for AI-written tests: guts each changed function and reruns only its own tests, reporting proven, hollow, one-sided, unverifiable, or no binding test — each with a replayable receipt.",
   "type": "module",
   "license": "MIT",
@@ -44,6 +44,7 @@
     "probe": "node mutation/probe.mjs"
   },
   "devDependencies": {
+    "@babel/parser": "^8.0.4",
     "ava": "^6.4.1",
     "jest": "^29.7.0",
     "mocha": "^10.8.2",

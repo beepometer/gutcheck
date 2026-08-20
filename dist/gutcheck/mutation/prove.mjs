@@ -222,8 +222,8 @@ function unescapeTitle(raw) {
 // openBrace }]`: `index` is the head match start, `title` is the unescaped runtime string (or, when
 // `dynamic`, the raw literal source text — display-only, since a dynamic title has no static runtime
 // value), and `openBrace` is the index of the call body's `{`.
+const AFTER_TITLE_RE = /^\s*,\s*(?:async\s*)?(?:(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|function\s*\*?\s*[A-Za-z_$]*\s*\([^)]*\))\s*\{/;
 function scanTitledCalls(code, headRe) {
-  const AFTER_TITLE_RE = /^\s*,\s*(?:async\s*)?(?:(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|function\s*\*?\s*[A-Za-z_$]*\s*\([^)]*\))\s*\{/;
   const out = [];
   for (const hm of code.matchAll(headRe)) {
     const qPos = hm.index + hm[0].length - 1; // index of the opening quote character itself
@@ -235,6 +235,47 @@ function scanTitledCalls(code, headRe) {
   }
   return out;
 }
+// Parameterized blocks — `it.each([...])('adds %i', fn)`, vitest's `.for`, the jest tagged-template
+// table form `it.each` + backtick-table + `('title $a', fn)`, with optional modifier chains
+// (`it.only.each`). The TITLE is runtime-expanded from the table (per-row `%i`/`$var` substitution),
+// so every discovered block is `dynamic: true` regardless of the literal's quote kind: it can never
+// be fed to a runner as a selector, but discovering it means prove() emits the honest
+// `why: 'dynamic-title'` skip (with fileMasked) and classifyChanges reads a fn covered only by these
+// as 'unverifiable', never the false 'untested'. Every non-parse falls closed to "not discovered"
+// (the status quo): an unbalanced table, a missing title call, or a concise-body callback emits
+// nothing rather than a corrupted block.
+const EACH_HEAD_RE = /\b(?:it|test)(?:\.(?:only|skip|concurrent|failing))?\.(?:each|for)\s*(?=\(|`)/g;
+function scanEachTitledCalls(code, maskedCode) {
+  const out = [];
+  for (const hm of code.matchAll(EACH_HEAD_RE)) {
+    if (!(maskedCode.startsWith('it', hm.index) || maskedCode.startsWith('test', hm.index))) continue; // blanked region → phantom
+    let p = hm.index + hm[0].length; // at the table's `(` or its tagged-template backtick
+    if (code[p] === '(') {
+      let d = 0, k = p;
+      for (; k < code.length; k++) { const c = maskedCode[k]; if (c === '(') d++; else if (c === ')') { d--; if (!d) { k++; break; } } }
+      if (d !== 0) continue; // unbalanced table — fail closed
+      p = k;
+    } else {
+      let k = p + 1; // raw scan: the mask blanks the whole template, delimiters included
+      while (k < code.length && !(code[k] === '`' && code[k - 1] !== '\\')) k++;
+      if (k >= code.length) continue; // unterminated — fail closed
+      p = k + 1;
+    }
+    let q = p;
+    while (q < code.length && /\s/.test(code[q])) q++;
+    if (code[q] !== '(') continue; // no title call — fail closed
+    q++;
+    while (q < code.length && /\s/.test(code[q])) q++;
+    if (!'\'"`'.includes(code[q])) continue;
+    const sq = scanQuoted(code, q);
+    if (!sq) continue;
+    const rest = AFTER_TITLE_RE.exec(code.slice(sq.end + 1));
+    if (!rest) continue;
+    out.push({ index: hm.index, title: sq.dynamic ? sq.raw : unescapeTitle(sq.raw), dynamic: true, openBrace: sq.end + rest[0].length });
+  }
+  return out;
+}
+
 export function parseBlocks(code, lang) {
   const out = [];
   if (lang === 'python') {
@@ -429,6 +470,7 @@ export function parseBlocks(code, lang) {
     if (!(maskedCode.startsWith('it', tc.index) || maskedCode.startsWith('test', tc.index))) continue; // blanked region → phantom
     events.push({ kind: 'test', pos: tc.index, tc });
   }
+  for (const tc of scanEachTitledCalls(code, maskedCode)) events.push({ kind: 'test', pos: tc.index, tc });
   events.sort((a, b) => a.pos - b.pos);
   const stack = [];
   for (const e of events) {

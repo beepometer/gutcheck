@@ -50,7 +50,7 @@ const SKIP_LABELS = new Map([
   ['no-pin', 'no value-pinning assertion'],
   ['sut-unresolved', 'tested function not locatable'],
   ['ungutable', 'function body not guttable'],
-  ['dynamic-title', 'test title is dynamic (template interpolation)'],
+  ['dynamic-title', 'test title is dynamic (interpolated or parameterized)'],
   ['instrumented-test', 'instrumented androidTest (not supported)'],
   ['unsupported-source-set', 'unsupported KMP source set'],
   ['pin-unresolved', 'pin not tied to a called function'],
@@ -437,7 +437,7 @@ export function main(argv) {
   if (!flags.has('no-self-check')) {
     const sc = selfCheck();
     if (!sc.ok) { process.stderr.write(`gutcheck self-check FAILED — ${sc.detail}. Refusing to run.\n`); return 2; }
-    (machine ? process.stderr : process.stdout).write('gutcheck self-check ✓ — caught its planted fake test, passed its planted real test\n');
+    (machine ? process.stderr : process.stdout).write('gutcheck self-check ✓ — caught its planted fake test, passed its planted real tests\n');
   }
 
   // Progress: one stderr line per probed block — a long diff-scoped run must never look hung.

@@ -48,7 +48,7 @@ test('banner: the six original labels are unchanged (no churn for existing reade
   ] };
   assert.equal(
     banner(r),
-    'probed 4 functions · runner=node · 6 skipped (1 no value-pinning assertion, 1 tested function not locatable, 1 function body not guttable, 1 test title is dynamic (template interpolation), 1 instrumented androidTest (not supported), 1 unsupported KMP source set)',
+    'probed 4 functions · runner=node · 6 skipped (1 no value-pinning assertion, 1 tested function not locatable, 1 function body not guttable, 1 test title is dynamic (interpolated or parameterized), 1 instrumented androidTest (not supported), 1 unsupported KMP source set)',
   );
 });
 

@@ -72,3 +72,15 @@ test('does NOT flag the war-story shape when it lives INSIDE a quoted string or 
   assert.equal(detect(quoted, env).length, 0, 'double-quoted string literal must not flag');
   assert.equal(detect(templated, env).length, 0, 'template literal must not flag');
 });
+
+// CONTESTED, PINNED AS-IS (2026-08-19 lint audit): a plain optional-key default-contract assertion
+// (`cfg.plugins ?? {}` vs `{}` on a call-derived object) FLAGS, by the same rule (c) that carries the
+// corpus's measured-true one-hop findings (`klass.checks ?? []`) — statically the two shapes are
+// identical, and the corpus cycle measured 16 TRUE / 0 FP for this rule. An adversarial audit built a
+// realistic counterexample (a test whose stated purpose IS the default contract), so this is a known
+// judgment call: relaxing it requires corpus evidence, not a constructed case. The check's advice
+// stands regardless (assert `cfg.plugins === undefined` to pin the default precisely).
+test('pins the contested default-contract shape: a plain property fallback on a call-derived object still flags', () => {
+  const src = "const cfg = loadConfig('missing.json');\nassert.deepStrictEqual(cfg.plugins ?? {}, {});";
+  assert.equal(detect(src, env).length, 1);
+});

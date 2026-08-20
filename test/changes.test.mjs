@@ -651,3 +651,112 @@ test('unverifiable reason rollup: a strictly higher static count still wins outr
   const { changes } = classifyChanges(changed, blocks);
   assert.equal(changes[0].evidence.reason, 'no-pin', 'count dominance is unchanged — priority applies only at a tie');
 });
+
+// ---- TRUE-DELTA fixes (2026-08-19 differential audit): shapes the probe ALREADY guts that ----
+// ---- enumeration missed — each was a silent denominator hole (a changed fn with no row).  ----
+
+test('grammar sync (ts generics): generic fn decls and generic const-arrows are enumerated AND guttable', () => {
+  const TS = 'export function identity<T>(x: T): T {\n  return x;\n}\nconst first = <T,>(arr: T[]) =>\n  arr.length ? arr[0] : undefined;\n';
+  const fns = declaredFns(TS, 'js');
+  assert.deepEqual(fns.map((d) => d.fn).sort(), ['first', 'identity']);
+  for (const d of fns) {
+    const broken = grossBreak(TS, d.fn, 'typescript');
+    assert.ok(broken !== null && broken !== TS, `grossBreak must gut ${d.fn}`);
+  }
+});
+
+test('grammar sync (java): multi-line signatures and Allman braces are enumerated AND guttable, spans reach the body', () => {
+  const J = 'class Calc {\n  int add(\n      int a,\n      int b) {\n    return a + b;\n  }\n  long mul(long a, long b)\n  {\n    return a * b;\n  }\n}\n';
+  const fns = declaredFns(J, 'java');
+  assert.deepEqual(fns.map((d) => d.fn).sort(), ['add', 'mul']);
+  const add = fns.find((d) => d.fn === 'add');
+  const mul = fns.find((d) => d.fn === 'mul');
+  assert.equal(add.line, 2); assert.equal(add.endLine, 6);
+  assert.equal(mul.line, 7); assert.equal(mul.endLine, 10);
+  for (const d of fns) {
+    const broken = grossBreak(J, d.fn, 'java');
+    assert.ok(broken !== null && broken !== J, `grossBreak must gut ${d.fn}`);
+  }
+});
+
+test('grammar sync (java): a multi-line call feeding a block is never a phantom decl', () => {
+  const J = 'class C {\n  void run() {\n    if (check(a,\n        b)) {\n      act();\n    }\n  }\n}\n';
+  assert.deepEqual(declaredFns(J, 'java').map((d) => d.fn), ['run']);
+});
+
+test('grammar sync (kotlin): a fun whose name sits on the continuation line is enumerated AND guttable', () => {
+  const K = 'fun\nadd(a: Int, b: Int): Int {\n  return a + b\n}\n';
+  const fns = declaredFns(K, 'kotlin');
+  assert.deepEqual(fns.map((d) => d.fn), ['add']);
+  assert.equal(fns[0].line, 1);
+  assert.equal(fns[0].endLine, 4);
+  const broken = grossBreak(K, 'add', 'kotlin');
+  assert.ok(broken !== null && broken !== K, 'grossBreak must gut the continuation-line fun');
+});
+
+test('grammar sync (kotlin): a multi-line parameter list still spans to the body close', () => {
+  const K = 'fun add(\n  a: Int,\n  b: Int,\n): Int {\n  return a + b\n}\n';
+  const fns = declaredFns(K, 'kotlin');
+  assert.deepEqual(fns.map((d) => d.fn), ['add']);
+  assert.equal(fns[0].endLine, 6, 'body-only hunks must mark the fn changed');
+});
+
+// jsEndLine runaway (found by the differential audit): a semicolon-less multi-line arrow decl —
+// universal in no-semi codebases — had no terminator, so its span brace-walked into the NEXT braced
+// declaration and a hunk touching only that neighbor marked the arrow changed too (a phantom row).
+test('changedDecls: a semicolon-less arrow span ends before the next declaration (no swallow)', () => {
+  const S = 'export const inc = (x) =>\n  x + 1\nexport function g() {\n  return 2;\n}\n';
+  const fns = declaredFns(S, 'js');
+  assert.equal(fns.find((d) => d.fn === 'inc').endLine, 2, 'inc ends at its own last body line');
+  assert.deepEqual(changedDecls(S, 'js', [[3, 5]]).map((d) => d.fn), ['g'], 'a hunk touching only g marks only g');
+});
+
+// KNOWN DELTA pin (mirrors the object-property fn-expression pin): a CLASS-FIELD arrow is guttable
+// but deliberately NOT enumerated — without class-context tracking the same shape is a plain local
+// reassignment (`handler = (e) => …;` inside a function body), and enumerating those would flood the
+// report with phantom rows. Precision first; a flip here must be deliberate.
+test('known delta: a class-field arrow is guttable but deliberately not enumerated', () => {
+  const C = 'export class Counter {\n  bump = (n) => n + 1;\n}\n';
+  assert.ok(grossBreak(C, 'bump', 'typescript') !== null, 'the probe CAN gut a class-field arrow');
+  assert.deepEqual(declaredFns(C, 'js').map((d) => d.fn), [], 'enumeration deliberately skips it');
+});
+
+// Adversarial-review findings (2026-08-19, pre-commit review of the decl-consolidation change):
+
+// (critical) The naive `<...>(` const-branch also matched an old-style TS type-assertion CAST —
+// `const el = <Foo>(bar());` is not a function declaration; enumerating it minted a phantom
+// ungutable row. The generic-arrow form is enumerated only when `=>` follows the balanced params.
+test('grammar sync (ts generics): a type-assertion cast is never enumerated; a multi-line generic arrow is', () => {
+  const CAST = 'const el = <Foo>(bar());\nconsole.log(el);\n';
+  assert.deepEqual(declaredFns(CAST, 'js').map((d) => d.fn), [], 'a cast is not a declaration');
+  const CAST2 = 'const el = <Foo>(bar(\n  1, 2\n))\n\nexport function g() {\n  return 2;\n}\n';
+  assert.deepEqual(declaredFns(CAST2, 'js').map((d) => d.fn), ['g'], 'a multi-line no-semi cast is not a declaration either');
+  const ML = 'export const first = <T,>(\n  arr: T[],\n) =>\n  arr.length ? arr[0] : undefined;\n';
+  assert.deepEqual(declaredFns(ML, 'js').map((d) => d.fn), ['first'], 'a multi-line generic arrow IS enumerated');
+});
+
+// (high, pre-existing) A parenthesized param annotation — `@Size(min=1)`, ubiquitous in Spring/JPA —
+// made the unbalanced `[^)]*` params group miss the real closing paren and drop the whole method.
+test('grammar sync (java): parenthesized param annotations do not drop the method', () => {
+  const J = 'class C {\n  void foo(@Size(min=1, max=10) String s) {\n    process(s);\n  }\n  int bar(int x) {\n    return x;\n  }\n}\n';
+  const fns = declaredFns(J, 'java');
+  assert.deepEqual(fns.map((d) => d.fn).sort(), ['bar', 'foo']);
+  assert.equal(fns.find((d) => d.fn === 'foo').endLine, 4);
+  const broken = grossBreak(J, 'foo', 'java');
+  assert.ok(broken !== null && broken !== J, 'the probe already guts it — enumeration must keep up');
+});
+
+// (medium) The Kotlin body-brace lookahead stopped at the params' own line: an Allman brace or a
+// where-clause line under-spanned the fn to its decl line, so body-only hunks missed it. A bodyless
+// interface member must still fall back to endLine === line without running into the next member.
+test('grammar sync (kotlin): Allman braces and where-clause lines span to the body close; bodyless members do not run away', () => {
+  const A = 'fun add(a: Int, b: Int): Int\n{\n  return a + b\n}\n';
+  assert.equal(declaredFns(A, 'kotlin')[0].endLine, 4, 'Allman brace body is spanned');
+  const W = 'fun <T> pick(xs: List<T>): T\n  where T : Comparable<T>\n{\n  return xs.first()\n}\n';
+  assert.equal(declaredFns(W, 'kotlin')[0].endLine, 5, 'where-clause body is spanned');
+  const I = 'interface Repo {\n  fun load(id: Int): Item\n  fun save(item: Item) {\n    persist(item)\n  }\n}\n';
+  const fns = declaredFns(I, 'kotlin');
+  assert.deepEqual(fns.map((d) => d.fn), ['load', 'save']);
+  assert.equal(fns.find((d) => d.fn === 'load').endLine, 2, 'bodyless member stays on its own line');
+  assert.equal(fns.find((d) => d.fn === 'save').endLine, 5, 'the next member is unaffected');
+});
